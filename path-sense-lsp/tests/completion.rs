@@ -137,6 +137,7 @@ fn integration_completion_lists_files_in_directory() {
         "YAML",
         Some(document_path.as_path()),
         false,
+        &[],
         None,
     )
     .expect("context");
@@ -151,6 +152,39 @@ fn integration_completion_lists_files_in_directory() {
 
     assert_eq!(labels, vec!["main.rs"]);
     assert_eq!(items[0].sort_text.as_deref(), Some("1_main.rs"));
+}
+
+#[test]
+fn integration_completion_supports_unquoted_yaml_plain_scalars() {
+    let tmp = tempdir().expect("tempdir");
+    let project = tmp.path().join("project");
+    let src = project.join("src");
+    std::fs::create_dir_all(&src).expect("mkdir");
+    std::fs::write(src.join("main.rs"), "fn main() {}").expect("write main");
+
+    let document_path = project.join("config.yaml");
+    let text = "path: ./src/ma";
+    let context = extract_completion_context(
+        text,
+        position(0, 14),
+        "YAML",
+        Some(document_path.as_path()),
+        false,
+        &[],
+        None,
+    )
+    .expect("context");
+
+    let engine = PathSenseEngine;
+    let items = engine.items_for_context(
+        &context,
+        &workspace_roots(project.as_path()),
+        &default_settings(),
+    );
+    let labels: Vec<_> = items.iter().map(|item| item.label.as_str()).collect();
+
+    assert_eq!(labels, vec!["main.rs"]);
+    assert_eq!(context.raw_token, "./src/ma");
 }
 
 #[test]
@@ -169,6 +203,7 @@ fn integration_completion_shows_hidden_entries_when_prefixed_with_dot() {
         "Shell Script",
         Some(document_path.as_path()),
         false,
+        &[],
         None,
     )
     .expect("context");
@@ -199,6 +234,7 @@ fn integration_completion_uses_filesystem_root_for_absolute_paths_by_default() {
         "Rust",
         Some(document_path.as_path()),
         false,
+        &[],
         None,
     )
     .expect("context");
@@ -224,6 +260,7 @@ fn integration_completion_can_use_workspace_root_for_absolute_paths() {
         "Rust",
         Some(document_path.as_path()),
         false,
+        &[],
         None,
     )
     .expect("context");
@@ -260,6 +297,7 @@ fn integration_completion_supports_tilde_and_path_mappings() {
         "Rust",
         Some(document_path.as_path()),
         false,
+        &[],
         None,
     )
     .expect("context");
@@ -276,6 +314,7 @@ fn integration_completion_supports_tilde_and_path_mappings() {
         "Rust",
         Some(document_path.as_path()),
         true,
+        &[],
         None,
     )
     .expect("tilde context");

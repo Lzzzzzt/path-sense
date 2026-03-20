@@ -46,6 +46,7 @@ impl PathSenseEngine {
             request.language_id,
             request.document_path,
             request.allow_empty_token,
+            &mapping_keys,
             outside_strings.as_ref(),
         )?;
 

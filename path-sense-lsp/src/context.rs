@@ -80,6 +80,7 @@ struct QueryExtraction<'a> {
     tree: &'a Tree,
     language_kind: LanguageKind,
     document_path: Option<&'a Path>,
+    mapping_keys: &'a [String],
     allow_empty_token: bool,
 }
 
@@ -90,6 +91,7 @@ pub fn extract_completion_context(
     language_id: &str,
     document_path: Option<&Path>,
     allow_empty_token: bool,
+    mapping_keys: &[String],
     outside_strings: Option<&OutsideStringsConfig<'_>>,
 ) -> Option<CompletionContext> {
     let cursor = CursorLocation {
@@ -104,6 +106,7 @@ pub fn extract_completion_context(
             tree: &tree,
             language_kind: profile.kind,
             document_path,
+            mapping_keys,
             allow_empty_token,
         };
 
@@ -175,6 +178,7 @@ fn quoted_query(kind: LanguageKind) -> &'static str {
 
 fn bare_query(kind: LanguageKind) -> Option<&'static str> {
     match kind {
+        LanguageKind::Yaml => Some("(plain_scalar) @path.context"),
         LanguageKind::Nix => {
             Some("[(path_expression) (hpath_expression) (spath_expression)] @path.context")
         }
@@ -225,6 +229,7 @@ fn extract_context_from_query(
                 request.document_path,
                 request.language_kind,
                 node,
+                request.mapping_keys,
                 request.allow_empty_token,
             ),
             CompletionTrigger::OutsideString => None,
@@ -314,6 +319,7 @@ fn build_bare_context(
     document_path: Option<&Path>,
     language_kind: LanguageKind,
     node: Node,
+    mapping_keys: &[String],
     allow_empty_token: bool,
 ) -> Option<CompletionContext> {
     if cursor < node.start_byte() || cursor > node.end_byte() {
@@ -321,6 +327,24 @@ fn build_bare_context(
     }
     if has_disallowed_content_before_cursor(node, cursor, language_kind) {
         return None;
+    }
+
+    if language_kind == LanguageKind::Yaml {
+        let token = text.get(node.start_byte()..cursor)?;
+        if !yaml_plain_scalar_is_supported_position(node)
+            || !path_like_token_is_supported(token, mapping_keys)
+        {
+            return None;
+        }
+
+        return build_context_unchecked(
+            text,
+            cursor,
+            document_path,
+            node.start_byte(),
+            CompletionTrigger::BareToken,
+            allow_empty_token,
+        );
     }
 
     build_context(
@@ -379,7 +403,7 @@ fn build_outside_context(
     if token.is_empty() && !allow_empty_token {
         return None;
     }
-    if !outside_string_token_is_supported(token, mapping_keys) {
+    if !path_like_token_is_supported(token, mapping_keys) {
         return None;
     }
 
@@ -394,7 +418,7 @@ fn build_outside_context(
     )
 }
 
-fn outside_string_token_is_supported(token: &str, mapping_keys: &[String]) -> bool {
+fn path_like_token_is_supported(token: &str, mapping_keys: &[String]) -> bool {
     token.starts_with("./")
         || token.starts_with("../")
         || token.starts_with('/')
@@ -410,6 +434,32 @@ fn outside_string_token_is_supported(token: &str, mapping_keys: &[String]) -> bo
                     token.starts_with(format!("{key}/").as_str())
                 }
         })
+}
+
+fn yaml_plain_scalar_is_supported_position(node: Node) -> bool {
+    let mut current = node;
+    let mut in_flow_sequence = false;
+
+    while let Some(parent) = current.parent() {
+        match parent.kind() {
+            "block_mapping_pair" | "flow_pair" => {
+                return parent
+                    .child_by_field_name("value")
+                    .is_some_and(|value| node_contains_node(value, node));
+            }
+            "block_sequence_item" => return true,
+            "flow_sequence" => in_flow_sequence = true,
+            _ => {}
+        }
+        current = parent;
+    }
+
+    in_flow_sequence
+}
+
+fn node_contains_node(ancestor: Node, descendant: Node) -> bool {
+    ancestor.start_byte() <= descendant.start_byte()
+        && ancestor.end_byte() >= descendant.end_byte()
 }
 
 fn normalize_mapping_key(key: &str) -> &str {
@@ -575,6 +625,29 @@ fn build_context(
     }
 
     if !token_is_supported(language_kind, token, trigger) {
+        return None;
+    }
+
+    build_context_unchecked(
+        text,
+        cursor,
+        document_path,
+        token_start,
+        trigger,
+        allow_empty_token,
+    )
+}
+
+fn build_context_unchecked(
+    text: &str,
+    cursor: usize,
+    document_path: Option<&Path>,
+    token_start: usize,
+    trigger: CompletionTrigger,
+    allow_empty_token: bool,
+) -> Option<CompletionContext> {
+    let token = text.get(token_start..cursor)?;
+    if token.is_empty() && !allow_empty_token {
         return None;
     }
 
@@ -744,6 +817,7 @@ mod tests {
             "JavaScript",
             Some(Path::new("/work/project/app.js")),
             false,
+            &[],
             None,
         )
         .expect("context");
@@ -761,6 +835,7 @@ mod tests {
             "TOML",
             Some(Path::new("/work/project/config.toml")),
             true,
+            &[],
             None,
         )
         .expect("context");
@@ -780,6 +855,7 @@ mod tests {
                 "JavaScript",
                 Some(Path::new("/work/project/app.js")),
                 false,
+                &[],
                 None,
             )
             .is_none()
@@ -795,6 +871,7 @@ mod tests {
             "Shell Script",
             Some(Path::new("/work/project/script.sh")),
             false,
+            &[],
             None,
         )
         .expect("context");
@@ -820,6 +897,7 @@ mod tests {
                 "Rust",
                 Some(Path::new("/work/project/main.rs")),
                 false,
+                &[],
                 None,
             )
             .is_none()
@@ -836,6 +914,7 @@ mod tests {
                 "JavaScript",
                 Some(Path::new("/work/project/app.js")),
                 false,
+                &[],
                 None,
             )
             .is_none()
@@ -851,6 +930,7 @@ mod tests {
             "TOML",
             Some(Path::new("/work/project/config.toml")),
             false,
+            &[],
             None,
         )
         .expect("context");
@@ -868,6 +948,7 @@ mod tests {
             "Nix",
             Some(Path::new("/work/project/flake.nix")),
             false,
+            &[],
             None,
         )
         .expect("context");
@@ -885,6 +966,7 @@ mod tests {
             "Nix",
             Some(Path::new("/work/project/home.nix")),
             false,
+            &[],
             None,
         )
         .expect("context");
@@ -904,6 +986,7 @@ mod tests {
                 "Shell Script",
                 Some(Path::new("/work/project/script.sh")),
                 false,
+                &[],
                 None,
             )
             .is_none()
@@ -911,20 +994,8 @@ mod tests {
     }
 
     #[test]
-    fn outside_string_fallback_is_opt_in() {
+    fn yaml_plain_scalar_prefers_native_syntax_over_outside_string_fallback() {
         let text = "path: ~/Doc";
-        assert!(
-            extract_completion_context(
-                text,
-                position(0, 11),
-                "YAML",
-                Some(Path::new("/work/project/config.yaml")),
-                false,
-                None,
-            )
-            .is_none()
-        );
-
         let mapping_keys = vec!["@assets".to_string()];
         let outside_strings = OutsideStringsConfig {
             path_separators: " \t({[",
@@ -936,11 +1007,12 @@ mod tests {
             "YAML",
             Some(Path::new("/work/project/config.yaml")),
             false,
+            &mapping_keys,
             Some(&outside_strings),
         )
-        .expect("outside string context");
+        .expect("yaml plain scalar context");
 
-        assert_eq!(context.trigger, CompletionTrigger::OutsideString);
+        assert_eq!(context.trigger, CompletionTrigger::BareToken);
         assert_eq!(context.raw_token, "~/Doc");
     }
 
@@ -958,11 +1030,78 @@ mod tests {
             "Plain Text",
             Some(Path::new("/work/project/notes.txt")),
             false,
+            &mapping_keys,
             Some(&outside_strings),
         )
         .expect("outside string context");
 
         assert_eq!(context.raw_token, "@assets");
         assert_eq!(context.trigger, CompletionTrigger::OutsideString);
+    }
+
+    #[test]
+    fn yaml_plain_scalar_path_like_values_are_supported() {
+        for (text, character, expected) in [
+            ("path: ./mod", 11, "./mod"),
+            ("path: ~/src", 11, "~/src"),
+            ("imports: /etc/hos", 17, "/etc/hos"),
+            ("- ./modules/dev", 15, "./modules/dev"),
+        ] {
+            let context = extract_completion_context(
+                text,
+                position(0, character),
+                "YAML",
+                Some(Path::new("/work/project/config.yaml")),
+                false,
+                &[],
+                None,
+            )
+            .expect("yaml plain scalar context");
+
+            assert_eq!(context.trigger, CompletionTrigger::BareToken);
+            assert_eq!(context.raw_token, expected);
+        }
+    }
+
+    #[test]
+    fn yaml_plain_scalar_rejects_keys_non_paths_and_block_scalars() {
+        assert!(
+            extract_completion_context(
+                "imports:",
+                position(0, 7),
+                "YAML",
+                Some(Path::new("/work/project/config.yaml")),
+                false,
+                &[],
+                None,
+            )
+            .is_none()
+        );
+
+        assert!(
+            extract_completion_context(
+                "name: hello",
+                position(0, 11),
+                "YAML",
+                Some(Path::new("/work/project/config.yaml")),
+                false,
+                &[],
+                None,
+            )
+            .is_none()
+        );
+
+        assert!(
+            extract_completion_context(
+                "script: |\n  ./modules/dev\n",
+                position(1, 15),
+                "YAML",
+                Some(Path::new("/work/project/config.yaml")),
+                false,
+                &[],
+                None,
+            )
+            .is_none()
+        );
     }
 }
