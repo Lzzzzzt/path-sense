@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tower_lsp::lsp_types::{
     Command, CompletionItem, CompletionItemKind, CompletionItemLabelDetails, CompletionResponse,
@@ -60,7 +60,11 @@ impl PathSenseEngine {
         }
 
         let bases = resolve_bases(&context, request.workspace_roots, request.settings);
+        let has_existing_file_base = bases.iter().any(base_points_to_existing_file);
         let items = self.items_for_bases(&bases, context.replacement_range, request.settings);
+        if items.is_empty() && has_existing_file_base {
+            return None;
+        }
         Some(CompletionResponse::Array(items))
     }
 
@@ -73,6 +77,9 @@ impl PathSenseEngine {
         let mut deduped = BTreeMap::new();
 
         for base in bases {
+            if base_points_to_existing_file(base) {
+                continue;
+            }
             for candidate in read_directory_candidates(base, settings) {
                 let key = (
                     candidate.name.clone(),
@@ -102,6 +109,15 @@ impl PathSenseEngine {
         let bases = resolve_bases(context, workspace_roots, settings);
         self.items_for_bases(&bases, context.replacement_range, settings)
     }
+}
+
+fn base_points_to_existing_file(base: &ResolvedBase) -> bool {
+    fs::metadata(normalized_target_path(base))
+        .is_ok_and(|metadata| metadata.is_file())
+}
+
+fn normalized_target_path(base: &ResolvedBase) -> PathBuf {
+    base.target_dir.components().collect()
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -255,7 +271,9 @@ mod tests {
     use std::path::PathBuf;
 
     use tempfile::tempdir;
+    use tower_lsp::lsp_types::Position;
 
+    use crate::context::extract_completion_context;
     use crate::resolver::ResolvedBase;
     use crate::settings::PathSenseSettings;
 
@@ -394,5 +412,48 @@ mod tests {
         };
         let candidates = read_directory_candidates(&base(tmp.path().to_path_buf(), "."), &settings);
         assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn file_path_descents_do_not_return_completion_items() {
+        let tmp = tempdir().expect("tempdir");
+        let project = tmp.path().join("project");
+        let src = project.join("src");
+        std::fs::create_dir_all(&src).expect("mkdir src");
+        std::fs::write(src.join("main.rs"), "fn main() {}").expect("write main");
+
+        let text = "path: ./src/main.rs/";
+        let document_path = project.join("config.yaml");
+        std::fs::write(&document_path, text).expect("write config");
+
+        let context = extract_completion_context(
+            text,
+            Position::new(0, 20),
+            "YAML",
+            Some(document_path.as_path()),
+            false,
+            &[],
+            None,
+        )
+        .expect("context");
+        let workspace_roots = WorkspaceRoots {
+            internal_worktree_root: Some(project.clone()),
+            lsp_roots: Vec::new(),
+        };
+        let settings = PathSenseSettings::default();
+
+        let items = PathSenseEngine.items_for_context(&context, &workspace_roots, &settings);
+        assert!(items.is_empty());
+
+        let request = CompletionRequest {
+            text,
+            position: Position::new(0, 20),
+            language_id: "YAML",
+            document_path: Some(document_path.as_path()),
+            workspace_roots: &workspace_roots,
+            allow_empty_token: false,
+            settings: &settings,
+        };
+        assert!(PathSenseEngine.complete(&request).is_none());
     }
 }
