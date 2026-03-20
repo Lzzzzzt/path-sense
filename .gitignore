@@ -1,0 +1,3 @@
+/target
+*.wasm
+/path-sense-lsp/target

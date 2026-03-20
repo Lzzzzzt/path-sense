@@ -1,0 +1,43 @@
+id = "path-sense"
+name = "Path Sense"
+version = "0.1.0"
+schema_version = 1
+description = "Filename and path completion for Zed"
+repository = "https://github.com/lzzzt/path-sense"
+authors = ["lzzzt"]
+themes = []
+icon_themes = []
+languages = []
+capabilities = []
+
+[lib]
+kind = "Rust"
+version = "0.7.0"
+
+[grammars]
+
+[language_servers.path-sense]
+languages = [
+  "JavaScript",
+  "TypeScript",
+  "JSX",
+  "TSX",
+  "Python",
+  "Rust",
+  "Go",
+  "Nix",
+  "TOML",
+  "YAML",
+  "JSON",
+  "Shell Script",
+]
+
+[language_servers.path-sense.language_ids]
+
+[context_servers]
+
+[agent_servers]
+
+[slash_commands]
+
+[indexed_docs_providers]
