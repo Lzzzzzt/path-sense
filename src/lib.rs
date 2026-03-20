@@ -57,8 +57,43 @@ impl PathSenseExtension {
         })
     }
 
+    fn completion_is_directory(completion: &zed::lsp::Completion) -> bool {
+        matches!(completion.kind, Some(zed::lsp::CompletionKind::Folder))
+    }
+
+    fn completion_annotation(completion: &zed::lsp::Completion) -> Option<String> {
+        match completion.kind {
+            Some(zed::lsp::CompletionKind::Folder) => Some("Directory".to_string()),
+            Some(zed::lsp::CompletionKind::File) => Some("File".to_string()),
+            _ => completion.detail.clone(),
+        }
+    }
+
     fn completion_label(completion: &zed::lsp::Completion) -> String {
-        completion.label.clone()
+        if Self::completion_is_directory(completion) && !completion.label.ends_with('/') {
+            format!("{}/", completion.label)
+        } else {
+            completion.label.clone()
+        }
+    }
+
+    fn completion_code_label(completion: &zed::lsp::Completion) -> CodeLabel {
+        let label = Self::completion_label(completion);
+        let annotation = Self::completion_annotation(completion);
+        let code = annotation.as_ref().map_or_else(
+            || label.clone(),
+            |annotation| format!("{label} {annotation}"),
+        );
+        let mut spans = vec![CodeLabelSpan::literal(label.clone(), None)];
+        if let Some(annotation) = annotation {
+            spans.push(CodeLabelSpan::literal(" ", None));
+            spans.push(CodeLabelSpan::literal(annotation, None));
+        }
+        CodeLabel {
+            code,
+            spans,
+            filter_range: (0..label.len()).into(),
+        }
     }
 
     fn initialization_options(worktree: &Worktree, user_options: Option<Value>) -> Value {
@@ -153,13 +188,53 @@ impl zed::Extension for PathSenseExtension {
             return None;
         }
 
-        let label = Self::completion_label(&completion);
-        Some(CodeLabel {
-            code: label.clone(),
-            spans: vec![CodeLabelSpan::literal(label.clone(), None)],
-            filter_range: (0..label.len()).into(),
-        })
+        Some(Self::completion_code_label(&completion))
     }
 }
 
 zed::register_extension!(PathSenseExtension);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn completion(
+        kind: Option<zed::lsp::CompletionKind>,
+        detail: Option<&str>,
+    ) -> zed::lsp::Completion {
+        zed::lsp::Completion {
+            label: "src".to_string(),
+            label_details: None,
+            detail: detail.map(str::to_string),
+            kind,
+            insert_text_format: None,
+        }
+    }
+
+    #[test]
+    fn directory_labels_always_show_trailing_slash() {
+        let completion = completion(Some(zed::lsp::CompletionKind::Folder), Some("Directory"));
+        assert_eq!(PathSenseExtension::completion_label(&completion), "src/");
+    }
+
+    #[test]
+    fn file_annotations_prefer_completion_kind() {
+        let completion = completion(Some(zed::lsp::CompletionKind::File), None);
+        assert_eq!(
+            PathSenseExtension::completion_annotation(&completion).as_deref(),
+            Some("File")
+        );
+    }
+
+    #[test]
+    fn annotation_spans_do_not_use_italic_highlight() {
+        let completion = completion(Some(zed::lsp::CompletionKind::Folder), Some("Directory"));
+        let label = PathSenseExtension::completion_code_label(&completion);
+        let Some(CodeLabelSpan::Literal(annotation)) = label.spans.get(2) else {
+            panic!("expected annotation literal span");
+        };
+
+        assert_eq!(annotation.text, "Directory");
+        assert!(annotation.highlight_name.is_none());
+    }
+}

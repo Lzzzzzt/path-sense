@@ -4,8 +4,9 @@ use std::fs;
 use std::path::Path;
 
 use tower_lsp::lsp_types::{
-    Command, CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit,
-    InsertTextFormat, Position, TextEdit,
+    Command, CompletionItem, CompletionItemKind, CompletionItemLabelDetails, CompletionResponse,
+    CompletionTextEdit, Documentation, InsertTextFormat, MarkupContent, MarkupKind, Position,
+    TextEdit,
 };
 
 use crate::context::{CompletionContext, OutsideStringsConfig, extract_completion_context};
@@ -110,11 +111,16 @@ struct Candidate {
 }
 
 impl Candidate {
+    fn annotation(&self) -> &'static str {
+        if self.is_dir { "Directory" } else { "File" }
+    }
+
     fn into_completion_item(
         self,
         range: tower_lsp::lsp_types::Range,
         settings: &PathSenseSettings,
     ) -> CompletionItem {
+        let annotation = self.annotation().to_string();
         let insert_text = if self.is_dir {
             format!(
                 "{0}{1}{2}",
@@ -142,6 +148,15 @@ impl Candidate {
                 self.name.to_lowercase()
             )),
             filter_text: Some(self.name.clone()),
+            label_details: Some(CompletionItemLabelDetails {
+                detail: None,
+                description: Some(annotation.clone()),
+            }),
+            detail: Some(annotation.clone()),
+            documentation: Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: format!("{} path completion for `{}`.", annotation, self.name),
+            })),
             text_edit: Some(CompletionTextEdit::Edit(TextEdit {
                 range,
                 new_text: insert_text,
@@ -323,6 +338,13 @@ mod tests {
             candidate.into_completion_item(tower_lsp::lsp_types::Range::default(), &settings("/"));
         assert_eq!(item.label, "src/");
         assert!(matches!(item.kind, Some(CompletionItemKind::FOLDER)));
+        assert_eq!(item.detail.as_deref(), Some("Directory"));
+        assert_eq!(
+            item.label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("Directory")
+        );
         assert_eq!(
             item.command
                 .as_ref()
@@ -358,6 +380,7 @@ mod tests {
         let item =
             candidate.into_completion_item(tower_lsp::lsp_types::Range::default(), &settings(""));
         assert_eq!(item.label, "src");
+        assert_eq!(item.detail.as_deref(), Some("Directory"));
         assert!(item.command.is_none());
     }
 
