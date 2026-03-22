@@ -63,9 +63,17 @@ impl PathSenseExtension {
 
     fn completion_annotation(completion: &zed::lsp::Completion) -> Option<String> {
         match completion.kind {
-            Some(zed::lsp::CompletionKind::Folder) => Some("Directory".to_string()),
-            Some(zed::lsp::CompletionKind::File) => Some("File".to_string()),
+            Some(zed::lsp::CompletionKind::Folder) => Some("DIR".to_string()),
+            Some(zed::lsp::CompletionKind::File) => Some("FILE".to_string()),
             _ => completion.detail.clone(),
+        }
+    }
+
+    fn completion_annotation_highlight(completion: &zed::lsp::Completion) -> Option<String> {
+        match completion.kind {
+            Some(zed::lsp::CompletionKind::Folder) => Some("type".to_string()),
+            Some(zed::lsp::CompletionKind::File) => Some("string".to_string()),
+            _ => None,
         }
     }
 
@@ -80,14 +88,18 @@ impl PathSenseExtension {
     fn completion_code_label(completion: &zed::lsp::Completion) -> CodeLabel {
         let label = Self::completion_label(completion);
         let annotation = Self::completion_annotation(completion);
+        let annotation_highlight = Self::completion_annotation_highlight(completion);
         let code = annotation.as_ref().map_or_else(
             || label.clone(),
-            |annotation| format!("{label} {annotation}"),
+            |annotation| format!("{label} [{annotation}]"),
         );
         let mut spans = vec![CodeLabelSpan::literal(label.clone(), None)];
         if let Some(annotation) = annotation {
             spans.push(CodeLabelSpan::literal(" ", None));
-            spans.push(CodeLabelSpan::literal(annotation, None));
+            spans.push(CodeLabelSpan::literal(
+                format!("[{annotation}]"),
+                annotation_highlight,
+            ));
         }
         CodeLabel {
             code,
@@ -222,19 +234,19 @@ mod tests {
         let completion = completion(Some(zed::lsp::CompletionKind::File), None);
         assert_eq!(
             PathSenseExtension::completion_annotation(&completion).as_deref(),
-            Some("File")
+            Some("FILE")
         );
     }
 
     #[test]
-    fn annotation_spans_do_not_use_italic_highlight() {
+    fn annotation_spans_use_semantic_highlights() {
         let completion = completion(Some(zed::lsp::CompletionKind::Folder), Some("Directory"));
         let label = PathSenseExtension::completion_code_label(&completion);
         let Some(CodeLabelSpan::Literal(annotation)) = label.spans.get(2) else {
             panic!("expected annotation literal span");
         };
 
-        assert_eq!(annotation.text, "Directory");
-        assert!(annotation.highlight_name.is_none());
+        assert_eq!(annotation.text, "[DIR]");
+        assert_eq!(annotation.highlight_name.as_deref(), Some("type"));
     }
 }
