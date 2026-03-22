@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -25,6 +26,8 @@ struct InitializationOptions {
 #[derive(Default, Deserialize)]
 struct InternalInitializationOptions {
     worktree_root: Option<PathBuf>,
+    #[serde(default)]
+    alias_trigger_characters: Vec<String>,
 }
 
 pub struct Backend {
@@ -80,11 +83,12 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::INCREMENTAL,
                 )),
                 completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec![
-                        "/".to_string(),
-                        ".".to_string(),
-                        "~".to_string(),
-                    ]),
+                    trigger_characters: Some(completion_trigger_characters(
+                        initialization_options
+                            ._path_sense_internal
+                            .alias_trigger_characters
+                            .as_slice(),
+                    )),
                     ..CompletionOptions::default()
                 }),
                 ..ServerCapabilities::default()
@@ -187,9 +191,49 @@ fn roots_from_initialize_params(params: &InitializeParams) -> Vec<PathBuf> {
     roots
 }
 
+fn completion_trigger_characters(alias_trigger_characters: &[String]) -> Vec<String> {
+    let mut characters = vec!["/".to_string(), ".".to_string(), "~".to_string()];
+    let mut seen = characters.iter().cloned().collect::<BTreeSet<_>>();
+
+    for character in alias_trigger_characters {
+        if character.chars().count() != 1 {
+            continue;
+        }
+        if seen.insert(character.clone()) {
+            characters.push(character.clone());
+        }
+    }
+
+    characters
+}
+
 pub async fn run() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let (service, socket) = LspService::new(Backend::new);
     Server::new(stdin, stdout, socket).serve(service).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::completion_trigger_characters;
+
+    #[test]
+    fn trigger_characters_include_alias_prefixes_without_duplicates() {
+        assert_eq!(
+            completion_trigger_characters(&[
+                "@".to_string(),
+                "$".to_string(),
+                "/".to_string(),
+                "xx".to_string(),
+            ]),
+            vec![
+                "/".to_string(),
+                ".".to_string(),
+                "~".to_string(),
+                "@".to_string(),
+                "$".to_string(),
+            ]
+        );
+    }
 }

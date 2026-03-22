@@ -10,6 +10,7 @@ mod query;
 mod token;
 mod types;
 
+pub(crate) use token::mapping_key_supports_prefix_completion;
 pub use types::{CompletionContext, CompletionTrigger, OutsideStringsConfig};
 
 use handlers::handler_for_kind;

@@ -53,7 +53,18 @@ pub(super) fn path_like_token_is_supported(token: &str, mapping_keys: &[String])
                         .strip_prefix(key)
                         .is_some_and(|suffix| suffix.starts_with('/'))
                 }
+                || mapping_key_supports_prefix_completion(key, token)
         })
+}
+
+pub(crate) fn mapping_key_supports_prefix_completion(key: &str, token: &str) -> bool {
+    let Some(first_character) = key.chars().next() else {
+        return false;
+    };
+
+    !matches!(first_character, '/' | '.' | '~')
+        && !first_character.is_ascii_alphanumeric()
+        && key.starts_with(token)
 }
 
 fn normalize_mapping_key(key: &str) -> &str {

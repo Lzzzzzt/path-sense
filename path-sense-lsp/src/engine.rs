@@ -9,7 +9,10 @@ use tower_lsp::lsp_types::{
     TextEdit,
 };
 
-use crate::context::{CompletionContext, OutsideStringsConfig, extract_completion_context};
+use crate::context::{
+    CompletionContext, OutsideStringsConfig, extract_completion_context,
+    mapping_key_supports_prefix_completion,
+};
 use crate::resolver::{ResolvedBase, WorkspaceRoots, parent_candidate_dir, resolve_bases};
 use crate::settings::CompiledSettings;
 use crate::syntax::SyntaxSnapshot;
@@ -60,6 +63,11 @@ impl PathSenseEngine {
             return Some(CompletionResponse::Array(Vec::new()));
         }
 
+        let mapping_items = self.items_for_mapping_prefixes(&context, request.settings);
+        if !mapping_items.is_empty() {
+            return Some(CompletionResponse::Array(mapping_items));
+        }
+
         let bases = resolve_bases(&context, request.workspace_roots, request.settings);
         let has_existing_file_base = bases.iter().any(base_points_to_existing_file);
         let items = self.items_for_bases(&bases, context.replacement_range, request.settings);
@@ -107,8 +115,41 @@ impl PathSenseEngine {
         workspace_roots: &WorkspaceRoots,
         settings: &CompiledSettings,
     ) -> Vec<CompletionItem> {
+        let mapping_items = self.items_for_mapping_prefixes(context, settings);
+        if !mapping_items.is_empty() {
+            return mapping_items;
+        }
+
         let bases = resolve_bases(context, workspace_roots, settings);
         self.items_for_bases(&bases, context.replacement_range, settings)
+    }
+
+    #[must_use]
+    pub fn items_for_mapping_prefixes(
+        &self,
+        context: &CompletionContext,
+        settings: &CompiledSettings,
+    ) -> Vec<CompletionItem> {
+        let mut candidates = settings
+            .normalized_path_mapping_keys()
+            .iter()
+            .filter(|key| key.as_str() != context.raw_token.as_str())
+            .filter(|key| {
+                mapping_key_supports_prefix_completion(key.as_str(), context.raw_token.as_str())
+            })
+            .map(|key| Candidate {
+                name: key.clone(),
+                is_dir: true,
+                insert_prefix: String::new(),
+            })
+            .collect::<Vec<_>>();
+
+        candidates.sort_by(compare_candidates);
+        candidates
+            .into_iter()
+            .take(200)
+            .map(|candidate| candidate.into_completion_item(context.replacement_range, settings))
+            .collect()
     }
 }
 
@@ -132,6 +173,14 @@ impl Candidate {
         if self.is_dir { "Directory" } else { "File" }
     }
 
+    fn label(&self) -> String {
+        if self.is_dir {
+            format!("{}/", self.name)
+        } else {
+            self.name.clone()
+        }
+    }
+
     fn into_completion_item(
         self,
         range: tower_lsp::lsp_types::Range,
@@ -148,11 +197,7 @@ impl Candidate {
         } else {
             format!("{}{}", self.insert_prefix, self.name)
         };
-        let label = if self.is_dir {
-            format!("{}{}", self.name, settings.directory_suffix())
-        } else {
-            self.name.clone()
-        };
+        let label = self.label();
 
         CompletionItem {
             label,
@@ -423,9 +468,34 @@ mod tests {
         };
         let item =
             candidate.into_completion_item(tower_lsp::lsp_types::Range::default(), &settings(""));
-        assert_eq!(item.label, "src");
+        assert_eq!(item.label, "src/");
         assert_eq!(item.detail.as_deref(), Some("Directory"));
         assert!(item.command.is_none());
+    }
+
+    #[test]
+    fn mapping_prefix_candidates_prefer_virtual_aliases() {
+        let settings =
+            CompiledSettings::from(PathSenseSettings::from_json_value(serde_json::json!({
+                "path_mappings": {
+                    "@assets": "/tmp/assets",
+                    "$lib": "/tmp/lib"
+                }
+            })));
+        let context = CompletionContext {
+            trigger: crate::context::CompletionTrigger::QuotedString,
+            allow_empty_token: false,
+            document_path: Some(PathBuf::from("/work/project/src/app.ts")),
+            raw_token: "@a".to_string(),
+            line_prefix: String::new(),
+            insert_prefix: String::new(),
+            replacement_range: tower_lsp::lsp_types::Range::default(),
+            prefix: "@a".to_string(),
+        };
+
+        let items = PathSenseEngine.items_for_mapping_prefixes(&context, &settings);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "@assets/");
     }
 
     #[test]

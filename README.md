@@ -96,6 +96,7 @@ Notes:
 
 - `slash_root` defaults to `"filesystem"`. Set it to `"workspace"` to resolve `/...` relative to the current workspace root.
 - `path_mappings` supports a single string, an array of strings, or conditional mappings with `when`.
+- Punctuation-prefixed `path_mappings` keys such as `@assets` or `$lib` also contribute their leading character to the LSP trigger set, so typing that prefix can reopen completion for alias roots.
 - Supported mapping variables are `${home}`, `${workspace}`, `${folder}`, `${fileDirname}`, and `${relativeFileDirname}`.
 - `trigger_outside_strings` is off by default. When enabled, Path Sense can also offer completions from conservative lexical fallback contexts in supported languages.
 - `disable_up_one_folder = false` keeps the synthetic `..` entry enabled.
