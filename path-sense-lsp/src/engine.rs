@@ -181,6 +181,14 @@ impl Candidate {
         }
     }
 
+    fn sort_bucket(&self) -> u8 {
+        if self.name == ".." {
+            2
+        } else {
+            u8::from(!self.is_dir)
+        }
+    }
+
     fn into_completion_item(
         self,
         range: tower_lsp::lsp_types::Range,
@@ -208,7 +216,7 @@ impl Candidate {
             }),
             sort_text: Some(format!(
                 "{}{}",
-                if self.is_dir { "0_" } else { "1_" },
+                self.sort_bucket(),
                 self.name.to_lowercase()
             )),
             filter_text: Some(self.name.clone()),
@@ -241,11 +249,9 @@ impl Candidate {
 }
 
 fn compare_candidates(left: &Candidate, right: &Candidate) -> Ordering {
-    match (left.is_dir, right.is_dir) {
-        (true, false) => Ordering::Less,
-        (false, true) => Ordering::Greater,
-        _ => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
-    }
+    left.sort_bucket()
+        .cmp(&right.sort_bucket())
+        .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
 }
 
 fn read_directory_candidates(base: &ResolvedBase, settings: &CompiledSettings) -> Vec<Candidate> {
@@ -384,13 +390,25 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                (true, "..".to_string()),
                 (true, "a_dir".to_string()),
                 (true, "b_dir".to_string()),
                 (false, "a.txt".to_string()),
                 (false, "b.txt".to_string()),
+                (true, "..".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn synthetic_parent_candidate_uses_lowest_sort_text() {
+        let item = Candidate {
+            name: "..".to_string(),
+            is_dir: true,
+            insert_prefix: String::new(),
+        }
+        .into_completion_item(tower_lsp::lsp_types::Range::default(), &settings("/"));
+
+        assert_eq!(item.sort_text.as_deref(), Some("2.."));
     }
 
     #[test]

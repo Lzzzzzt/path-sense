@@ -194,7 +194,7 @@ fn integration_completion_lists_files_in_directory() {
     let labels: Vec<_> = items.iter().map(|item| item.label.as_str()).collect();
 
     assert_eq!(labels, vec!["main.rs"]);
-    assert_eq!(items[0].sort_text.as_deref(), Some("1_main.rs"));
+    assert_eq!(items[0].sort_text.as_deref(), Some("1main.rs"));
 }
 
 #[test]
