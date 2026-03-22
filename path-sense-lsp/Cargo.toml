@@ -27,8 +27,13 @@ tree-sitter-typescript.workspace = true
 tree-sitter-yaml.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 tempfile.workspace = true
 tower.workspace = true
+
+[[bench]]
+name = "perf"
+harness = false
 
 [lints]
 workspace = true

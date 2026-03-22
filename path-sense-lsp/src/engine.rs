@@ -11,7 +11,8 @@ use tower_lsp::lsp_types::{
 
 use crate::context::{CompletionContext, OutsideStringsConfig, extract_completion_context};
 use crate::resolver::{ResolvedBase, WorkspaceRoots, parent_candidate_dir, resolve_bases};
-use crate::settings::PathSenseSettings;
+use crate::settings::CompiledSettings;
+use crate::syntax::SyntaxSnapshot;
 
 const RETRIGGER_COMPLETION_COMMAND: &str = "editor::ShowCompletions";
 
@@ -21,11 +22,11 @@ pub struct PathSenseEngine;
 pub struct CompletionRequest<'a> {
     pub text: &'a str,
     pub position: Position,
-    pub language_id: &'a str,
+    pub syntax: Option<&'a SyntaxSnapshot>,
     pub document_path: Option<&'a Path>,
     pub workspace_roots: &'a WorkspaceRoots,
     pub allow_empty_token: bool,
-    pub settings: &'a PathSenseSettings,
+    pub settings: &'a CompiledSettings,
 }
 
 impl PathSenseEngine {
@@ -35,24 +36,24 @@ impl PathSenseEngine {
         let outside_strings =
             request
                 .settings
-                .trigger_outside_strings
+                .trigger_outside_strings()
                 .then_some(OutsideStringsConfig {
-                    path_separators: &request.settings.path_separators,
-                    mapping_keys: &mapping_keys,
+                    path_separators: request.settings.path_separators(),
+                    mapping_keys,
                 });
         let context = extract_completion_context(
             request.text,
             request.position,
-            request.language_id,
+            request.syntax,
             request.document_path,
             request.allow_empty_token,
-            &mapping_keys,
+            mapping_keys,
             outside_strings.as_ref(),
         )?;
 
         if request
             .settings
-            .ignored_prefixes
+            .ignored_prefixes()
             .iter()
             .any(|prefix| context.line_prefix.ends_with(prefix))
         {
@@ -72,7 +73,7 @@ impl PathSenseEngine {
         &self,
         bases: &[ResolvedBase],
         replacement_range: tower_lsp::lsp_types::Range,
-        settings: &PathSenseSettings,
+        settings: &CompiledSettings,
     ) -> Vec<CompletionItem> {
         let mut deduped = BTreeMap::new();
 
@@ -104,7 +105,7 @@ impl PathSenseEngine {
         &self,
         context: &CompletionContext,
         workspace_roots: &WorkspaceRoots,
-        settings: &PathSenseSettings,
+        settings: &CompiledSettings,
     ) -> Vec<CompletionItem> {
         let bases = resolve_bases(context, workspace_roots, settings);
         self.items_for_bases(&bases, context.replacement_range, settings)
@@ -112,8 +113,7 @@ impl PathSenseEngine {
 }
 
 fn base_points_to_existing_file(base: &ResolvedBase) -> bool {
-    fs::metadata(normalized_target_path(base))
-        .is_ok_and(|metadata| metadata.is_file())
+    fs::metadata(normalized_target_path(base)).is_ok_and(|metadata| metadata.is_file())
 }
 
 fn normalized_target_path(base: &ResolvedBase) -> PathBuf {
@@ -135,19 +135,21 @@ impl Candidate {
     fn into_completion_item(
         self,
         range: tower_lsp::lsp_types::Range,
-        settings: &PathSenseSettings,
+        settings: &CompiledSettings,
     ) -> CompletionItem {
         let annotation = self.annotation().to_string();
         let insert_text = if self.is_dir {
             format!(
                 "{0}{1}{2}",
-                self.insert_prefix, self.name, settings.directory_suffix
+                self.insert_prefix,
+                self.name,
+                settings.directory_suffix()
             )
         } else {
             format!("{}{}", self.insert_prefix, self.name)
         };
         let label = if self.is_dir {
-            format!("{}{}", self.name, settings.directory_suffix)
+            format!("{}{}", self.name, settings.directory_suffix())
         } else {
             self.name.clone()
         };
@@ -201,11 +203,11 @@ fn compare_candidates(left: &Candidate, right: &Candidate) -> Ordering {
     }
 }
 
-fn read_directory_candidates(base: &ResolvedBase, settings: &PathSenseSettings) -> Vec<Candidate> {
+fn read_directory_candidates(base: &ResolvedBase, settings: &CompiledSettings) -> Vec<Candidate> {
     let show_hidden = base.prefix.starts_with('.');
     let mut candidates = Vec::new();
 
-    if !settings.disable_up_one_folder
+    if !settings.disable_up_one_folder()
         && "..".starts_with(base.prefix.as_str())
         && parent_candidate_dir(base).is_some()
     {
@@ -248,16 +250,16 @@ fn read_directory_candidates(base: &ResolvedBase, settings: &PathSenseSettings) 
 pub fn path_completion_response(
     text: &str,
     position: Position,
-    language_id: &str,
+    syntax: Option<&SyntaxSnapshot>,
     document_path: Option<&Path>,
     workspace_roots: &WorkspaceRoots,
     allow_empty_token: bool,
-    settings: &PathSenseSettings,
+    settings: &CompiledSettings,
 ) -> Option<CompletionResponse> {
     let request = CompletionRequest {
         text,
         position,
-        language_id,
+        syntax,
         document_path,
         workspace_roots,
         allow_empty_token,
@@ -275,15 +277,38 @@ mod tests {
 
     use crate::context::extract_completion_context;
     use crate::resolver::ResolvedBase;
-    use crate::settings::PathSenseSettings;
+    use crate::settings::{CompiledSettings, PathSenseSettings};
+    use crate::syntax::SyntaxState;
 
     use super::*;
 
-    fn settings(directory_suffix: &str) -> PathSenseSettings {
+    fn settings(directory_suffix: &str) -> CompiledSettings {
         PathSenseSettings {
             directory_suffix: directory_suffix.to_string(),
             ..PathSenseSettings::default()
         }
+        .into()
+    }
+
+    fn extract(
+        text: &str,
+        position: Position,
+        language_id: &str,
+        document_path: Option<&Path>,
+        allow_empty_token: bool,
+    ) -> CompletionContext {
+        let syntax = SyntaxState::new(language_id, text);
+        let snapshot = syntax.as_ref().map(SyntaxState::snapshot);
+        extract_completion_context(
+            text,
+            position,
+            snapshot.as_ref(),
+            document_path,
+            allow_empty_token,
+            &[],
+            None,
+        )
+        .expect("context")
     }
 
     fn base(target_dir: PathBuf, prefix: &str) -> ResolvedBase {
@@ -409,7 +434,8 @@ mod tests {
         let settings = PathSenseSettings {
             disable_up_one_folder: true,
             ..PathSenseSettings::default()
-        };
+        }
+        .into();
         let candidates = read_directory_candidates(&base(tmp.path().to_path_buf(), "."), &settings);
         assert!(candidates.is_empty());
     }
@@ -426,29 +452,28 @@ mod tests {
         let document_path = project.join("config.yaml");
         std::fs::write(&document_path, text).expect("write config");
 
-        let context = extract_completion_context(
+        let context = extract(
             text,
             Position::new(0, 20),
             "YAML",
             Some(document_path.as_path()),
             false,
-            &[],
-            None,
-        )
-        .expect("context");
+        );
         let workspace_roots = WorkspaceRoots {
             internal_worktree_root: Some(project.clone()),
             lsp_roots: Vec::new(),
         };
-        let settings = PathSenseSettings::default();
+        let settings = CompiledSettings::default();
 
         let items = PathSenseEngine.items_for_context(&context, &workspace_roots, &settings);
         assert!(items.is_empty());
 
+        let syntax = SyntaxState::new("YAML", text);
+        let snapshot = syntax.as_ref().map(SyntaxState::snapshot);
         let request = CompletionRequest {
             text,
             position: Position::new(0, 20),
-            language_id: "YAML",
+            syntax: snapshot.as_ref(),
             document_path: Some(document_path.as_path()),
             workspace_roots: &workspace_roots,
             allow_empty_token: false,

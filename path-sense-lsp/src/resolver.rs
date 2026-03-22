@@ -1,11 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use globset::{Glob, GlobSetBuilder};
-
 use crate::context::CompletionContext;
-use crate::settings::{
-    ConditionalMapping, MappingTargets, PathMapping, PathSenseSettings, SlashRoot,
-};
+use crate::settings::{CompiledMappingEntry, CompiledSettings, SlashRoot};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WorkspaceRoots {
@@ -53,7 +49,7 @@ pub struct ResolvedBase {
 pub fn resolve_bases(
     context: &CompletionContext,
     workspace_roots: &WorkspaceRoots,
-    settings: &PathSenseSettings,
+    settings: &CompiledSettings,
 ) -> Vec<ResolvedBase> {
     if document_is_ignored(context.document_path.as_deref(), workspace_roots, settings) {
         return Vec::new();
@@ -70,7 +66,7 @@ pub fn resolve_bases(
 fn resolve_non_mapping_bases(
     context: &CompletionContext,
     workspace_roots: &WorkspaceRoots,
-    settings: &PathSenseSettings,
+    settings: &CompiledSettings,
 ) -> Vec<ResolvedBase> {
     let raw_token = context.raw_token.as_str();
 
@@ -97,7 +93,7 @@ fn resolve_non_mapping_bases(
     }
 
     if raw_token.starts_with('/') {
-        return match settings.slash_root {
+        return match settings.slash_root() {
             SlashRoot::Workspace => workspace_roots
                 .workspace_root_for_document(context.document_path.as_deref())
                 .map_or_else(Vec::new, |workspace_root| {
@@ -147,12 +143,12 @@ fn resolve_non_mapping_bases(
 fn resolve_from_mappings(
     context: &CompletionContext,
     workspace_roots: &WorkspaceRoots,
-    settings: &PathSenseSettings,
+    settings: &CompiledSettings,
 ) -> Vec<ResolvedBase> {
     let raw_token = context.raw_token.as_str();
-    let mapping_entries = normalized_mapping_entries(settings);
 
-    for (normalized_key, mapping) in mapping_entries {
+    for mapping in settings.mapping_entries() {
+        let normalized_key = mapping.normalized_key();
         if raw_token == normalized_key {
             let targets =
                 expand_mapping_targets(mapping, context.document_path.as_deref(), workspace_roots);
@@ -164,13 +160,13 @@ fn resolve_from_mappings(
                         target_dir: target.clone(),
                         boundary_root: Some(target),
                         prefix: String::new(),
-                        insert_prefix: exact_mapping_insert_prefix(&normalized_key),
+                        insert_prefix: exact_mapping_insert_prefix(normalized_key),
                     })
                     .collect();
             }
         }
 
-        let Some(remainder) = raw_token.strip_prefix(normalized_key.as_str()) else {
+        let Some(remainder) = raw_token.strip_prefix(normalized_key) else {
             continue;
         };
         let path_after_key = if normalized_key == "/" {
@@ -180,7 +176,6 @@ fn resolve_from_mappings(
         } else {
             continue;
         };
-
         let targets =
             expand_mapping_targets(mapping, context.document_path.as_deref(), workspace_roots);
         if targets.is_empty() {
@@ -198,26 +193,6 @@ fn resolve_from_mappings(
     Vec::new()
 }
 
-fn normalized_mapping_entries(settings: &PathSenseSettings) -> Vec<(String, &PathMapping)> {
-    let mut entries = settings
-        .path_mappings
-        .iter()
-        .map(|(key, value)| (normalize_mapping_key(key), value))
-        .collect::<Vec<_>>();
-    entries.sort_by(|(left, _), (right, _)| {
-        right.len().cmp(&left.len()).then_with(|| left.cmp(right))
-    });
-    entries
-}
-
-fn normalize_mapping_key(key: &str) -> String {
-    if key == "/" {
-        "/".to_string()
-    } else {
-        key.trim_end_matches('/').to_string()
-    }
-}
-
 fn exact_mapping_insert_prefix(key: &str) -> String {
     if key == "/" {
         "/".to_string()
@@ -227,35 +202,15 @@ fn exact_mapping_insert_prefix(key: &str) -> String {
 }
 
 fn expand_mapping_targets(
-    mapping: &PathMapping,
+    mapping: &CompiledMappingEntry,
     document_path: Option<&Path>,
     workspace_roots: &WorkspaceRoots,
 ) -> Vec<PathBuf> {
     let variables = PathVariables::new(document_path, workspace_roots);
-
-    match mapping {
-        PathMapping::Targets(targets) => expand_targets(targets, &variables),
-        PathMapping::Conditional { conditions } => conditions
-            .iter()
-            .filter(|condition| condition_matches(condition, &variables))
-            .flat_map(|condition| expand_targets(&condition.value, &variables))
-            .collect(),
-    }
-}
-
-fn condition_matches(condition: &ConditionalMapping, variables: &PathVariables) -> bool {
-    let Some(document_path) = &variables.relative_document_path else {
-        return false;
-    };
-
-    glob_matches(&condition.when, document_path)
-}
-
-fn expand_targets(targets: &MappingTargets, variables: &PathVariables) -> Vec<PathBuf> {
-    targets
-        .values()
+    mapping
+        .expand_targets(variables.relative_document_path.as_deref())
         .into_iter()
-        .filter_map(|value| resolve_mapping_target(value, variables))
+        .filter_map(|value| resolve_mapping_target(value, &variables))
         .collect()
 }
 
@@ -313,11 +268,11 @@ fn split_relative_fragment(fragment: &str) -> (&str, &str) {
 pub fn document_is_ignored(
     document_path: Option<&Path>,
     workspace_roots: &WorkspaceRoots,
-    settings: &PathSenseSettings,
+    settings: &CompiledSettings,
 ) -> bool {
-    if settings.ignored_files_patterns.is_empty() {
+    let Some(matcher) = settings.ignored_files_matcher() else {
         return false;
-    }
+    };
 
     let Some(document_path) = document_path else {
         return false;
@@ -326,10 +281,7 @@ pub fn document_is_ignored(
         .relative_document_path(document_path)
         .unwrap_or_else(|| path_to_forward_slashes(document_path));
 
-    settings
-        .ignored_files_patterns
-        .iter()
-        .any(|pattern| glob_matches(pattern, candidate.as_str()))
+    matcher.is_match(candidate.as_str())
 }
 
 #[must_use]
@@ -359,18 +311,6 @@ pub fn expand_home(fragment: &Path) -> Option<PathBuf> {
     } else {
         Some(home_dir.join(remainder))
     }
-}
-
-fn glob_matches(pattern: &str, candidate: &str) -> bool {
-    let mut builder = GlobSetBuilder::new();
-    let Ok(glob) = Glob::new(pattern) else {
-        return false;
-    };
-    builder.add(glob);
-    let Ok(globset) = builder.build() else {
-        return false;
-    };
-    globset.is_match(candidate)
 }
 
 fn path_to_forward_slashes(path: &Path) -> String {
@@ -447,7 +387,7 @@ mod tests {
 
     use super::*;
     use crate::context::CompletionTrigger;
-    use crate::settings::PathSenseSettings;
+    use crate::settings::{CompiledSettings, PathSenseSettings};
     use tower_lsp::lsp_types::Range;
 
     fn context(raw_token: &str, document_path: &Path) -> CompletionContext {
@@ -473,7 +413,7 @@ mod tests {
     #[test]
     fn slash_root_defaults_to_filesystem_root() {
         let document = Path::new("/work/project/src/app.rs");
-        let settings = PathSenseSettings::default();
+        let settings = CompiledSettings::default();
         let resolved = resolve_bases(
             &context("/tmp/fi", document),
             &WorkspaceRoots::default(),
@@ -489,9 +429,9 @@ mod tests {
     fn slash_root_can_use_workspace_root() {
         let project = Path::new("/work/project");
         let document = project.join("src/app.rs");
-        let settings = PathSenseSettings::from_json_value(json!({
+        let settings = CompiledSettings::from(PathSenseSettings::from_json_value(json!({
             "slash_root": "workspace"
-        }));
+        })));
         let resolved = resolve_bases(
             &context("/src/ma", &document),
             &workspace_roots(project),
@@ -509,7 +449,7 @@ mod tests {
         let resolved = resolve_bases(
             &context("~", document),
             &WorkspaceRoots::default(),
-            &PathSenseSettings::default(),
+            &CompiledSettings::default(),
         );
 
         assert_eq!(resolved[0].prefix, "");
@@ -520,12 +460,12 @@ mod tests {
     #[test]
     fn longest_mapping_prefix_wins() {
         let document = Path::new("/work/project/src/app.rs");
-        let settings = PathSenseSettings::from_json_value(json!({
+        let settings = CompiledSettings::from(PathSenseSettings::from_json_value(json!({
             "path_mappings": {
                 "/": "/fallback",
                 "/test": "/special"
             }
-        }));
+        })));
 
         let resolved = resolve_bases(
             &context("/test/fi", document),
@@ -540,7 +480,7 @@ mod tests {
     fn conditional_mapping_expands_variables() {
         let project = Path::new("/work/project");
         let document = project.join("src/app.rs");
-        let settings = PathSenseSettings::from_json_value(json!({
+        let settings = CompiledSettings::from(PathSenseSettings::from_json_value(json!({
             "path_mappings": {
                 "@assets": {
                     "conditions": [
@@ -551,7 +491,7 @@ mod tests {
                     ]
                 }
             }
-        }));
+        })));
 
         let resolved = resolve_bases(
             &context("@assets", &document),
@@ -566,9 +506,9 @@ mod tests {
     fn ignored_files_patterns_match_relative_document_path() {
         let project = Path::new("/work/project");
         let document = project.join("vendor/lib.rs");
-        let settings = PathSenseSettings::from_json_value(json!({
+        let settings = CompiledSettings::from(PathSenseSettings::from_json_value(json!({
             "ignored_files_patterns": ["vendor/**"]
-        }));
+        })));
 
         assert!(document_is_ignored(
             Some(document.as_path()),

@@ -14,7 +14,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use crate::document_store::{DocumentSnapshot, DocumentStore};
 use crate::engine::{CompletionRequest, PathSenseEngine};
 use crate::resolver::WorkspaceRoots;
-use crate::settings::PathSenseSettings;
+use crate::settings::CompiledSettings;
 
 #[derive(Default, Deserialize)]
 struct InitializationOptions {
@@ -30,7 +30,7 @@ struct InternalInitializationOptions {
 pub struct Backend {
     client: Client,
     documents: Arc<RwLock<DocumentStore>>,
-    settings: Arc<RwLock<PathSenseSettings>>,
+    settings: Arc<RwLock<Arc<CompiledSettings>>>,
     workspace_roots: Arc<RwLock<WorkspaceRoots>>,
     engine: PathSenseEngine,
 }
@@ -41,18 +41,19 @@ impl Backend {
         Self {
             client,
             documents: Arc::new(RwLock::new(DocumentStore::default())),
-            settings: Arc::new(RwLock::new(PathSenseSettings::default())),
+            settings: Arc::new(RwLock::new(Arc::new(CompiledSettings::default()))),
             workspace_roots: Arc::new(RwLock::new(WorkspaceRoots::default())),
             engine: PathSenseEngine,
         }
     }
 
     async fn snapshot_for_uri(&self, uri: &Url) -> Option<DocumentSnapshot> {
-        self.documents.read().await.get(uri).cloned()
+        self.documents.read().await.snapshot(uri)
     }
 
-    async fn settings(&self) -> PathSenseSettings {
-        self.settings.read().await.clone()
+    async fn settings(&self) -> Arc<CompiledSettings> {
+        let settings = self.settings.read().await;
+        Arc::clone(&settings)
     }
 
     async fn workspace_roots(&self) -> WorkspaceRoots {
@@ -76,7 +77,7 @@ impl LanguageServer for Backend {
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
+                    TextDocumentSyncKind::INCREMENTAL,
                 )),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![
@@ -118,13 +119,11 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change(&self, params: tower_lsp::lsp_types::DidChangeTextDocumentParams) {
-        if let Some(change) = params.content_changes.into_iter().last() {
-            self.documents.write().await.replace_text(
-                &params.text_document.uri,
-                change.text,
-                Some(params.text_document.version),
-            );
-        }
+        self.documents.write().await.apply_changes(
+            &params.text_document.uri,
+            params.content_changes,
+            Some(params.text_document.version),
+        );
     }
 
     async fn did_close(&self, params: tower_lsp::lsp_types::DidCloseTextDocumentParams) {
@@ -135,7 +134,7 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
-        *self.settings.write().await = PathSenseSettings::from_json_value(params.settings);
+        *self.settings.write().await = Arc::new(CompiledSettings::from_json_value(params.settings));
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
@@ -154,13 +153,13 @@ impl LanguageServer for Backend {
         let workspace_roots = self.workspace_roots().await;
 
         let request = CompletionRequest {
-            text: &snapshot.text,
+            text: snapshot.text.as_str(),
             position: params.text_document_position.position,
-            language_id: &snapshot.language_id,
+            syntax: snapshot.syntax.as_ref(),
             document_path: snapshot.path.as_deref(),
             workspace_roots: &workspace_roots,
             allow_empty_token,
-            settings: &settings,
+            settings: settings.as_ref(),
         };
         Ok(self.engine.complete(&request))
     }

@@ -13,6 +13,23 @@ Directory completions use a configurable `directory_suffix`, which defaults to `
 1. In Zed, use `Extensions: Install Dev Extension` and point it at this worktree.
 1. Zed will resolve the sidecar in this order: `lsp.path-sense.binary.path`, `<worktree>/target/debug/path-sense-lsp`, then `PATH`.
 
+## Benchmark
+
+Run the local performance suite with:
+
+```bash
+cargo bench -p path-sense-lsp
+```
+
+Criterion baselines can be compared with:
+
+```bash
+cargo bench -p path-sense-lsp -- --save-baseline before
+cargo bench -p path-sense-lsp -- --baseline before
+```
+
+The benchmark suite covers compiled settings construction, syntax-context extraction, repeated completion on an open document, incremental `didChange` updates, and an end-to-end LSP round trip.
+
 ## Local override
 
 You can override the language server binary in Zed settings:

@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 
 use streaming_iterator::StreamingIterator;
 use tower_lsp::lsp_types::{Position, Range};
-use tree_sitter::{Language, Node, Parser, Query, QueryCursor, Tree};
+use tree_sitter::{Node, Query, QueryCursor, Tree};
+
+use crate::syntax::{LanguageKind, SyntaxSnapshot, language_profile_for_kind};
+use crate::text::{position_to_offset, range_from_offsets};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompletionTrigger {
@@ -29,46 +32,6 @@ pub struct OutsideStringsConfig<'a> {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct LanguageProfile {
-    kind: LanguageKind,
-    quoted_query: &'static str,
-    bare_query: Option<&'static str>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LanguageKind {
-    JavaScript,
-    TypeScript,
-    Tsx,
-    Python,
-    Rust,
-    Go,
-    Nix,
-    Toml,
-    Yaml,
-    Json,
-    ShellScript,
-}
-
-impl LanguageKind {
-    fn language(self) -> Language {
-        match self {
-            Self::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
-            Self::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
-            Self::Python => tree_sitter_python::LANGUAGE.into(),
-            Self::Rust => tree_sitter_rust::LANGUAGE.into(),
-            Self::Go => tree_sitter_go::LANGUAGE.into(),
-            Self::Nix => tree_sitter_nix::LANGUAGE.into(),
-            Self::Toml => tree_sitter_toml_ng::LANGUAGE.into(),
-            Self::Yaml => tree_sitter_yaml::LANGUAGE.into(),
-            Self::Json => tree_sitter_json::LANGUAGE.into(),
-            Self::ShellScript => tree_sitter_bash::LANGUAGE.into(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
 struct CursorLocation {
     offset: usize,
 }
@@ -88,7 +51,7 @@ struct QueryExtraction<'a> {
 pub fn extract_completion_context(
     text: &str,
     position: Position,
-    language_id: &str,
+    syntax: Option<&SyntaxSnapshot>,
     document_path: Option<&Path>,
     allow_empty_token: bool,
     mapping_keys: &[String],
@@ -98,13 +61,13 @@ pub fn extract_completion_context(
         offset: position_to_offset(text, position)?,
     };
 
-    if let Some(profile) = language_profile(language_id) {
-        let tree = parse_syntax_tree(text, profile.kind)?;
+    if let Some(syntax) = syntax {
+        let profile = language_profile_for_kind(syntax.language_kind);
         let request = QueryExtraction {
             text,
             cursor,
-            tree: &tree,
-            language_kind: profile.kind,
+            tree: &syntax.tree,
+            language_kind: syntax.language_kind,
             document_path,
             mapping_keys,
             allow_empty_token,
@@ -137,77 +100,14 @@ pub fn extract_completion_context(
     })
 }
 
-fn language_profile(language_id: &str) -> Option<LanguageProfile> {
-    let kind = match normalize_language_id(language_id).as_str() {
-        "javascript" | "javascriptreact" | "jsx" => LanguageKind::JavaScript,
-        "typescript" => LanguageKind::TypeScript,
-        "typescriptreact" | "tsx" => LanguageKind::Tsx,
-        "python" => LanguageKind::Python,
-        "rust" => LanguageKind::Rust,
-        "go" => LanguageKind::Go,
-        "nix" => LanguageKind::Nix,
-        "toml" => LanguageKind::Toml,
-        "yaml" | "yml" => LanguageKind::Yaml,
-        "json" => LanguageKind::Json,
-        "shell script" | "shellscript" | "bash" | "sh" => LanguageKind::ShellScript,
-        _ => return None,
-    };
-
-    Some(LanguageProfile {
-        kind,
-        quoted_query: quoted_query(kind),
-        bare_query: bare_query(kind),
-    })
-}
-
-fn quoted_query(kind: LanguageKind) -> &'static str {
-    match kind {
-        LanguageKind::JavaScript | LanguageKind::TypeScript | LanguageKind::Tsx => {
-            "[(string) (template_string)] @path.context"
-        }
-        LanguageKind::Python | LanguageKind::Toml | LanguageKind::Json => "(string) @path.context",
-        LanguageKind::Rust => "[(string_literal) (raw_string_literal)] @path.context",
-        LanguageKind::Go => "[(interpreted_string_literal) (raw_string_literal)] @path.context",
-        LanguageKind::Nix => "[(string_expression) (indented_string_expression)] @path.context",
-        LanguageKind::Yaml => "[(double_quote_scalar) (single_quote_scalar)] @path.context",
-        LanguageKind::ShellScript => {
-            "[(string) (raw_string) (translated_string) (ansi_c_string)] @path.context"
-        }
-    }
-}
-
-fn bare_query(kind: LanguageKind) -> Option<&'static str> {
-    match kind {
-        LanguageKind::Yaml => Some("(plain_scalar) @path.context"),
-        LanguageKind::Nix => {
-            Some("[(path_expression) (hpath_expression) (spath_expression)] @path.context")
-        }
-        LanguageKind::ShellScript => Some("(word) @path.context"),
-        _ => None,
-    }
-}
-
-fn normalize_language_id(language_id: &str) -> String {
-    language_id.trim().to_ascii_lowercase()
-}
-
-fn parse_syntax_tree(text: &str, language_kind: LanguageKind) -> Option<Tree> {
-    let mut parser = Parser::new();
-    let language = language_kind.language();
-    parser.set_language(&language).ok()?;
-    parser.parse(text, None)
-}
-
 fn extract_context_from_query(
     request: QueryExtraction<'_>,
-    query_source: &str,
+    query: &Query,
     trigger: CompletionTrigger,
 ) -> Option<CompletionContext> {
-    let language = request.language_kind.language();
-    let query = Query::new(&language, query_source).ok()?;
     let root = request.tree.root_node();
     let nodes = captured_nodes_containing_cursor(
-        &query,
+        query,
         root,
         request.text.as_bytes(),
         request.cursor.offset,
@@ -250,6 +150,10 @@ fn captured_nodes_containing_cursor<'tree>(
     offset: usize,
 ) -> Vec<Node<'tree>> {
     let mut query_cursor = QueryCursor::new();
+    let range_start = offset.saturating_sub(1);
+    let range_end = offset.saturating_add(1).min(text.len());
+    query_cursor.set_byte_range(range_start..range_end);
+
     let mut nodes = Vec::new();
     let mut matches = query_cursor.matches(query, root, text);
 
@@ -458,8 +362,7 @@ fn yaml_plain_scalar_is_supported_position(node: Node) -> bool {
 }
 
 fn node_contains_node(ancestor: Node, descendant: Node) -> bool {
-    ancestor.start_byte() <= descendant.start_byte()
-        && ancestor.end_byte() >= descendant.end_byte()
+    ancestor.start_byte() <= descendant.start_byte() && ancestor.end_byte() >= descendant.end_byte()
 }
 
 fn normalize_mapping_key(key: &str) -> &str {
@@ -733,85 +636,41 @@ fn split_token_for_completion(token: &str) -> TokenParts<'_> {
     }
 }
 
-fn position_to_offset(text: &str, position: Position) -> Option<usize> {
-    let target_line = usize::try_from(position.line).ok()?;
-    let target_character = usize::try_from(position.character).ok()?;
-    let mut line = 0usize;
-    let mut character = 0usize;
-    let mut index = 0usize;
-
-    for (byte_index, ch) in text.char_indices() {
-        if line == target_line && character == target_character {
-            return Some(byte_index);
-        }
-        if ch == '\n' {
-            line += 1;
-            character = 0;
-            if line > target_line {
-                return None;
-            }
-        } else {
-            character += ch.len_utf16();
-        }
-        index = byte_index + ch.len_utf8();
-    }
-
-    if line == target_line && character == target_character {
-        Some(index)
-    } else if target_line == 0 && target_character == 0 && text.is_empty() {
-        Some(0)
-    } else {
-        None
-    }
-}
-
-fn range_from_offsets(text: &str, start: usize, end: usize) -> Option<Range> {
-    Some(Range::new(
-        offset_to_position(text, start)?,
-        offset_to_position(text, end)?,
-    ))
-}
-
-fn offset_to_position(text: &str, offset: usize) -> Option<Position> {
-    if offset > text.len() || !text.is_char_boundary(offset) {
-        return None;
-    }
-
-    let mut line = 0u32;
-    let mut character = 0u32;
-
-    for (byte_index, ch) in text.char_indices() {
-        if byte_index == offset {
-            return Some(Position::new(line, character));
-        }
-
-        if ch == '\n' {
-            line += 1;
-            character = 0;
-        } else {
-            character += u32::try_from(ch.len_utf16()).ok()?;
-        }
-    }
-
-    if offset == text.len() {
-        Some(Position::new(line, character))
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::syntax::SyntaxState;
 
     fn position(line: u32, character: u32) -> Position {
         Position::new(line, character)
     }
 
+    fn extract(
+        text: &str,
+        position: Position,
+        language_id: &str,
+        document_path: Option<&Path>,
+        allow_empty_token: bool,
+        mapping_keys: &[String],
+        outside_strings: Option<&OutsideStringsConfig<'_>>,
+    ) -> Option<CompletionContext> {
+        let syntax = SyntaxState::new(language_id, text);
+        let snapshot = syntax.as_ref().map(SyntaxState::snapshot);
+        extract_completion_context(
+            text,
+            position,
+            snapshot.as_ref(),
+            document_path,
+            allow_empty_token,
+            mapping_keys,
+            outside_strings,
+        )
+    }
+
     #[test]
     fn javascript_string_context_detects_fragment() {
         let text = r#"const path = "./src/ma";"#;
-        let context = extract_completion_context(
+        let context = extract(
             text,
             position(0, 22),
             "JavaScript",
@@ -829,7 +688,7 @@ mod tests {
     #[test]
     fn tilde_token_preserves_home_insert_prefix() {
         let text = r#"path = "~""#;
-        let context = extract_completion_context(
+        let context = extract(
             text,
             position(0, 9),
             "TOML",
@@ -849,7 +708,7 @@ mod tests {
     fn javascript_template_string_rejects_prior_substitution() {
         let text = "const path = `${base}/src/ma`;";
         assert!(
-            extract_completion_context(
+            extract(
                 text,
                 position(0, 28),
                 "JavaScript",
@@ -865,7 +724,7 @@ mod tests {
     #[test]
     fn shell_bare_token_detects_relative_path() {
         let text = "cp ./src/ma ./dest";
-        let context = extract_completion_context(
+        let context = extract(
             text,
             position(0, 11),
             "Shell Script",
@@ -891,7 +750,7 @@ mod tests {
     fn incomplete_rust_string_context_is_rejected() {
         let text = r#"let path = "./src/ma"#;
         assert!(
-            extract_completion_context(
+            extract(
                 text,
                 position(0, 20),
                 "Rust",
@@ -908,7 +767,7 @@ mod tests {
     fn incomplete_javascript_string_context_is_rejected() {
         let text = r#"const path = "./src/ma"#;
         assert!(
-            extract_completion_context(
+            extract(
                 text,
                 position(0, 22),
                 "JavaScript",
@@ -924,7 +783,7 @@ mod tests {
     #[test]
     fn quoted_relative_fragment_without_slash_is_supported() {
         let text = r#"path = "rea""#;
-        let context = extract_completion_context(
+        let context = extract(
             text,
             position(0, 11),
             "TOML",
@@ -942,7 +801,7 @@ mod tests {
     #[test]
     fn nix_bare_path_without_dot_prefix_is_supported() {
         let text = "imports = [ nix/modules/co ]";
-        let context = extract_completion_context(
+        let context = extract(
             text,
             position(0, 26),
             "Nix",
@@ -960,7 +819,7 @@ mod tests {
     #[test]
     fn nix_path_expression_is_supported() {
         let text = "++ lib.filesystem.listFilesRecursive ./modules/de;";
-        let context = extract_completion_context(
+        let context = extract(
             text,
             position(0, 49),
             "Nix",
@@ -980,7 +839,7 @@ mod tests {
     fn unsupported_plain_shell_token_is_rejected() {
         let text = "cp README";
         assert!(
-            extract_completion_context(
+            extract(
                 text,
                 position(0, 9),
                 "Shell Script",
@@ -1001,7 +860,7 @@ mod tests {
             path_separators: " \t({[",
             mapping_keys: &mapping_keys,
         };
-        let context = extract_completion_context(
+        let context = extract(
             text,
             position(0, 11),
             "YAML",
@@ -1024,7 +883,7 @@ mod tests {
             path_separators: " \t({[",
             mapping_keys: &mapping_keys,
         };
-        let context = extract_completion_context(
+        let context = extract(
             text,
             position(0, 12),
             "Plain Text",
@@ -1047,7 +906,7 @@ mod tests {
             ("imports: /etc/hos", 17, "/etc/hos"),
             ("- ./modules/dev", 15, "./modules/dev"),
         ] {
-            let context = extract_completion_context(
+            let context = extract(
                 text,
                 position(0, character),
                 "YAML",
@@ -1066,7 +925,7 @@ mod tests {
     #[test]
     fn yaml_plain_scalar_rejects_keys_non_paths_and_block_scalars() {
         assert!(
-            extract_completion_context(
+            extract(
                 "imports:",
                 position(0, 7),
                 "YAML",
@@ -1079,7 +938,7 @@ mod tests {
         );
 
         assert!(
-            extract_completion_context(
+            extract(
                 "name: hello",
                 position(0, 11),
                 "YAML",
@@ -1092,7 +951,7 @@ mod tests {
         );
 
         assert!(
-            extract_completion_context(
+            extract(
                 "script: |\n  ./modules/dev\n",
                 position(1, 15),
                 "YAML",
