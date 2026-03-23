@@ -1,3 +1,5 @@
+mod completion_documentation;
+
 pub mod context;
 pub mod document_store;
 pub mod engine;

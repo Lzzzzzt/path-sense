@@ -6,12 +6,13 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
-    CompletionOptions, CompletionParams, CompletionResponse, CompletionTriggerKind,
+    CompletionItem, CompletionOptions, CompletionParams, CompletionResponse, CompletionTriggerKind,
     DidChangeConfigurationParams, InitializeParams, InitializeResult, InitializedParams,
     ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
+use crate::completion_documentation::attach_completion_documentation;
 use crate::document_store::{DocumentSnapshot, DocumentStore};
 use crate::engine::{CompletionRequest, PathSenseEngine};
 use crate::resolver::WorkspaceRoots;
@@ -90,6 +91,7 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::INCREMENTAL,
                 )),
                 completion_provider: Some(CompletionOptions {
+                    resolve_provider: Some(true),
                     trigger_characters: Some(completion_trigger_characters(
                         initialization_options
                             ._path_sense_internal
@@ -172,6 +174,11 @@ impl LanguageServer for Backend {
             settings: settings.as_ref(),
         };
         Ok(self.engine.complete(&request))
+    }
+
+    async fn completion_resolve(&self, mut params: CompletionItem) -> Result<CompletionItem> {
+        attach_completion_documentation(&mut params);
+        Ok(params)
     }
 }
 
@@ -295,5 +302,16 @@ mod tests {
         assert!(!automatic.allow_empty_token);
         assert!(automatic.is_auto_trigger);
         assert_eq!(automatic.trigger_character, Some('/'));
+    }
+
+    #[test]
+    fn completion_options_enable_resolve_provider() {
+        let options = tower_lsp::lsp_types::CompletionOptions {
+            resolve_provider: Some(true),
+            trigger_characters: Some(completion_trigger_characters(&[])),
+            ..tower_lsp::lsp_types::CompletionOptions::default()
+        };
+
+        assert_eq!(options.resolve_provider, Some(true));
     }
 }

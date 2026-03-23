@@ -180,6 +180,26 @@ async fn completion_items_with_trigger(
         .expect("completion items")
 }
 
+async fn resolve_completion_item(
+    service: &mut LspService<Backend>,
+    item: serde_json::Value,
+) -> serde_json::Value {
+    let resolve = Request::build("completionItem/resolve")
+        .id(3)
+        .params(item)
+        .finish();
+    let response = service
+        .ready()
+        .await
+        .expect("service ready")
+        .call(resolve)
+        .await
+        .expect("resolve response")
+        .expect("resolve payload");
+
+    response.result().expect("resolve result").clone()
+}
+
 #[test]
 fn integration_completion_lists_files_in_directory() {
     let tmp = tempdir().expect("tempdir");
@@ -504,6 +524,10 @@ async fn lsp_completion_round_trip_returns_items() {
             .iter()
             .any(|value| value.as_str() == Some("~"))
     );
+    assert_eq!(
+        initialize_result["capabilities"]["completionProvider"]["resolveProvider"].as_bool(),
+        Some(true)
+    );
 
     open_document(&mut service, &document_uri, "Rust", document_text).await;
     let items = completion_items(&mut service, &document_uri, 19).await;
@@ -522,6 +546,137 @@ async fn lsp_completion_round_trip_returns_items() {
         module_dir["command"]["command"].as_str(),
         Some("editor::ShowCompletions")
     );
+}
+
+#[tokio::test]
+async fn lsp_completion_resolve_previews_utf8_text_files() {
+    let tmp = tempdir().expect("tempdir");
+    let project = tmp.path().join("project");
+    let src = project.join("src");
+    std::fs::create_dir_all(&src).expect("mkdir src");
+    std::fs::write(
+        src.join("sample.txt"),
+        "first line\nsecond line\nthird line\nfourth line\n",
+    )
+    .expect("write sample");
+
+    let document_uri = format!("file://{}", project.join("config.yaml").display());
+    let document_text = r#"path: "./src/sa""#;
+
+    let (mut service, _socket) = LspService::new(Backend::new);
+    let _ = initialize_service(&mut service, project.as_path()).await;
+    open_document(&mut service, &document_uri, "YAML", document_text).await;
+
+    let items = completion_items(&mut service, &document_uri, 15).await;
+    let sample = items
+        .into_iter()
+        .find(|item| item["label"].as_str() == Some("sample.txt"))
+        .expect("sample item");
+    let resolved = resolve_completion_item(&mut service, sample).await;
+    let documentation = resolved["documentation"]["value"]
+        .as_str()
+        .expect("documentation");
+
+    assert!(documentation.contains("first line\nsecond line\nthird line"));
+    assert!(documentation.contains("Preview truncated."));
+}
+
+#[tokio::test]
+async fn lsp_completion_resolve_previews_utf8_bom_and_utf16_files() {
+    let tmp = tempdir().expect("tempdir");
+    let project = tmp.path().join("project");
+    let src = project.join("src");
+    std::fs::create_dir_all(&src).expect("mkdir src");
+    std::fs::write(src.join("utf8.txt"), b"\xEF\xBB\xBFalpha\nbeta\n").expect("write utf8");
+
+    let mut utf16_bytes = vec![0xFF, 0xFE];
+    utf16_bytes.extend("gamma\ndelta\n".encode_utf16().flat_map(u16::to_le_bytes));
+    std::fs::write(src.join("utf16.txt"), utf16_bytes).expect("write utf16");
+
+    let document_uri = format!("file://{}", project.join("config.yaml").display());
+    let (mut service, _socket) = LspService::new(Backend::new);
+    let _ = initialize_service(&mut service, project.as_path()).await;
+
+    for (document_text, label, expected_line) in [
+        (r#"path: "./src/ut""#, "utf8.txt", "alpha"),
+        (r#"path: "./src/utf1""#, "utf16.txt", "gamma"),
+    ] {
+        open_document(&mut service, &document_uri, "YAML", document_text).await;
+        let cursor = u32::try_from(document_text.len() - 1).expect("cursor");
+        let items = completion_items(&mut service, &document_uri, cursor).await;
+        let candidate = items
+            .into_iter()
+            .find(|item| item["label"].as_str() == Some(label))
+            .expect("candidate");
+        let resolved = resolve_completion_item(&mut service, candidate).await;
+        let documentation = resolved["documentation"]["value"]
+            .as_str()
+            .expect("documentation");
+        assert!(documentation.contains(expected_line));
+    }
+}
+
+#[tokio::test]
+async fn lsp_completion_resolve_falls_back_for_binary_files() {
+    let tmp = tempdir().expect("tempdir");
+    let project = tmp.path().join("project");
+    let src = project.join("src");
+    std::fs::create_dir_all(&src).expect("mkdir src");
+    std::fs::write(src.join("blob.bin"), [0x00, 0x01, 0x02, 0x03]).expect("write blob");
+
+    let document_uri = format!("file://{}", project.join("config.yaml").display());
+    let document_text = r#"path: "./src/bl""#;
+
+    let (mut service, _socket) = LspService::new(Backend::new);
+    let _ = initialize_service(&mut service, project.as_path()).await;
+    open_document(&mut service, &document_uri, "YAML", document_text).await;
+
+    let items = completion_items(&mut service, &document_uri, 15).await;
+    let blob = items
+        .into_iter()
+        .find(|item| item["label"].as_str() == Some("blob.bin"))
+        .expect("blob item");
+    let resolved = resolve_completion_item(&mut service, blob).await;
+    assert_eq!(
+        resolved["documentation"]["value"].as_str(),
+        Some("File path completion for `blob.bin`.")
+    );
+}
+
+#[tokio::test]
+async fn lsp_completion_resolve_previews_directory_structure() {
+    let tmp = tempdir().expect("tempdir");
+    let project = tmp.path().join("project");
+    let src = project.join("src");
+    let docs = src.join("docs");
+    std::fs::create_dir_all(docs.join("guide")).expect("mkdir guide");
+    std::fs::write(docs.join("index.md"), "hello\n").expect("write index");
+    std::fs::write(docs.join(".hidden"), "secret\n").expect("write hidden");
+    for index in 0..10 {
+        std::fs::write(docs.join(format!("entry-{index}.txt")), "x\n").expect("write entry");
+    }
+
+    let document_uri = format!("file://{}", project.join("config.yaml").display());
+    let document_text = r#"path: "./src/do""#;
+
+    let (mut service, _socket) = LspService::new(Backend::new);
+    let _ = initialize_service(&mut service, project.as_path()).await;
+    open_document(&mut service, &document_uri, "YAML", document_text).await;
+
+    let items = completion_items(&mut service, &document_uri, 15).await;
+    let docs_item = items
+        .into_iter()
+        .find(|item| item["label"].as_str() == Some("docs/"))
+        .expect("docs item");
+    let resolved = resolve_completion_item(&mut service, docs_item).await;
+    let documentation = resolved["documentation"]["value"]
+        .as_str()
+        .expect("documentation");
+
+    assert!(documentation.contains("docs/\n|-- guide/"));
+    assert!(documentation.contains("|-- entry-0.txt"));
+    assert!(documentation.contains("`-- ..."));
+    assert!(!documentation.contains(".hidden"));
 }
 
 #[tokio::test]

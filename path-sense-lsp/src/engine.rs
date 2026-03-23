@@ -6,10 +6,12 @@ use std::path::{Path, PathBuf};
 
 use tower_lsp::lsp_types::{
     Command, CompletionItem, CompletionItemKind, CompletionItemLabelDetails, CompletionResponse,
-    CompletionTextEdit, Documentation, InsertTextFormat, MarkupContent, MarkupKind, Position,
-    TextEdit,
+    CompletionTextEdit, InsertTextFormat, Position, TextEdit,
 };
 
+use crate::completion_documentation::{
+    completion_item_data, fallback_completion_documentation,
+};
 use crate::context::{
     CompletionContext, OutsideStringsConfig, extract_completion_context,
     mapping_key_supports_prefix_completion,
@@ -169,6 +171,7 @@ impl PathSenseEngine {
             .map(|key| Candidate {
                 name: key.clone(),
                 is_dir: true,
+                path: None,
                 insert_prefix: String::new(),
                 match_quality: MatchQuality::Prefix,
             })
@@ -238,6 +241,7 @@ fn normalized_target_path(base: &ResolvedBase) -> PathBuf {
 struct Candidate {
     name: String,
     is_dir: bool,
+    path: Option<PathBuf>,
     insert_prefix: String,
     match_quality: MatchQuality,
 }
@@ -307,10 +311,20 @@ impl Candidate {
                 description: Some(annotation.clone()),
             }),
             detail: Some(annotation.clone()),
-            documentation: Some(Documentation::MarkupContent(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: format!("{} path completion for `{}`.", annotation, self.name),
-            })),
+            documentation: Some(fallback_completion_documentation(
+                annotation.as_str(),
+                self.name.as_str(),
+            )),
+            data: self
+                .path
+                .as_deref()
+                .and_then(|path| serde_json::to_value(completion_item_data(
+                    path,
+                    self.is_dir,
+                    annotation.as_str(),
+                    self.name.as_str(),
+                ))
+                .ok()),
             text_edit: Some(CompletionTextEdit::Edit(TextEdit {
                 range,
                 new_text: insert_text,
@@ -347,6 +361,7 @@ fn read_directory_candidates(base: &ResolvedBase, settings: &CompiledSettings) -
         candidates.push(Candidate {
             name: "..".to_string(),
             is_dir: true,
+            path: parent_candidate_dir(base),
             insert_prefix: base.insert_prefix.clone(),
             match_quality: MatchQuality::Prefix,
         });
@@ -373,6 +388,7 @@ fn read_directory_candidates(base: &ResolvedBase, settings: &CompiledSettings) -
         candidates.push(Candidate {
             name,
             is_dir,
+            path: Some(entry.path()),
             insert_prefix: base.insert_prefix.clone(),
             match_quality,
         });
@@ -531,6 +547,7 @@ mod tests {
         let item = Candidate {
             name: "..".to_string(),
             is_dir: true,
+            path: None,
             insert_prefix: String::new(),
             match_quality: MatchQuality::Prefix,
         }
@@ -587,6 +604,7 @@ mod tests {
         let candidate = Candidate {
             name: "src".to_string(),
             is_dir: true,
+            path: None,
             insert_prefix: String::new(),
             match_quality: MatchQuality::Prefix,
         };
@@ -610,10 +628,49 @@ mod tests {
     }
 
     #[test]
+    fn completion_items_include_resolve_data_for_real_directory_candidates() {
+        let candidate_path = PathBuf::from("/tmp/src");
+        let candidate = Candidate {
+            name: "src".to_string(),
+            is_dir: true,
+            path: Some(candidate_path.clone()),
+            insert_prefix: String::new(),
+            match_quality: MatchQuality::Prefix,
+        };
+
+        let item =
+            candidate.into_completion_item(tower_lsp::lsp_types::Range::default(), &settings("/"));
+        let data = item.data.expect("completion data");
+
+        assert_eq!(data["path"].as_str(), Some(candidate_path.to_string_lossy().as_ref()));
+        assert_eq!(data["kind"].as_str(), Some("directory"));
+    }
+
+    #[test]
+    fn completion_items_include_resolve_data_for_real_file_candidates() {
+        let candidate_path = PathBuf::from("/tmp/src/main.rs");
+        let candidate = Candidate {
+            name: "main.rs".to_string(),
+            is_dir: false,
+            path: Some(candidate_path.clone()),
+            insert_prefix: String::new(),
+            match_quality: MatchQuality::Prefix,
+        };
+
+        let item =
+            candidate.into_completion_item(tower_lsp::lsp_types::Range::default(), &settings("/"));
+        let data = item.data.expect("completion data");
+
+        assert_eq!(data["path"].as_str(), Some(candidate_path.to_string_lossy().as_ref()));
+        assert_eq!(data["kind"].as_str(), Some("file"));
+    }
+
+    #[test]
     fn tilde_context_preserves_home_prefix_in_insert_text() {
         let candidate = Candidate {
             name: "Documents".to_string(),
             is_dir: true,
+            path: None,
             insert_prefix: "~/".to_string(),
             match_quality: MatchQuality::Prefix,
         };
@@ -632,6 +689,7 @@ mod tests {
         let candidate = Candidate {
             name: "src".to_string(),
             is_dir: true,
+            path: None,
             insert_prefix: String::new(),
             match_quality: MatchQuality::Prefix,
         };

@@ -6,6 +6,8 @@ Zed extension for filename and path completion.
 
 Directory completions use a configurable `directory_suffix`, which defaults to `/`. When the suffix contains `/`, folder items also attach a best-effort `editor::ShowCompletions` command so Zed can reopen completion immediately after accepting a folder item. If the client ignores that command, the behavior safely degrades to inserting the configured suffix and waiting for the next manual or trigger-character completion.
 
+Completion documentation is loaded lazily via `completionItem/resolve`. Text files show a short head preview, directories show a shallow tree preview, and non-text files fall back to the default file or directory description.
+
 ## Development
 
 1. Build the sidecar with `cargo build -p path-sense-lsp`.
