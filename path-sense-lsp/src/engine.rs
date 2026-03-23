@@ -29,6 +29,8 @@ pub struct CompletionRequest<'a> {
     pub document_path: Option<&'a Path>,
     pub workspace_roots: &'a WorkspaceRoots,
     pub allow_empty_token: bool,
+    pub is_auto_trigger: bool,
+    pub trigger_character: Option<char>,
     pub settings: &'a CompiledSettings,
 }
 
@@ -61,6 +63,9 @@ impl PathSenseEngine {
             .any(|prefix| context.line_prefix.ends_with(prefix))
         {
             return Some(CompletionResponse::Array(Vec::new()));
+        }
+        if should_suppress_for_min_auto_trigger(request, &context) {
+            return None;
         }
 
         let mapping_items = self.items_for_mapping_prefixes(&context, request.settings);
@@ -151,6 +156,49 @@ impl PathSenseEngine {
             .map(|candidate| candidate.into_completion_item(context.replacement_range, settings))
             .collect()
     }
+}
+
+fn should_suppress_for_min_auto_trigger(
+    request: &CompletionRequest<'_>,
+    context: &CompletionContext,
+) -> bool {
+    request.is_auto_trigger
+        && !bypasses_min_auto_trigger(request, context, request.settings)
+        && context.prefix.chars().count() < request.settings.min_auto_trigger_word_length()
+}
+
+fn bypasses_min_auto_trigger(
+    request: &CompletionRequest<'_>,
+    context: &CompletionContext,
+    settings: &CompiledSettings,
+) -> bool {
+    is_path_separator_trigger(request.trigger_character)
+        || is_explicit_path_root(context, settings)
+        || is_alias_prefix_context(context, settings)
+}
+
+fn is_path_separator_trigger(trigger_character: Option<char>) -> bool {
+    matches!(trigger_character, Some('/' | '.' | '~'))
+}
+
+fn is_explicit_path_root(context: &CompletionContext, settings: &CompiledSettings) -> bool {
+    let raw_token = context.raw_token.as_str();
+    raw_token == "~"
+        || raw_token.starts_with("~/")
+        || raw_token.starts_with('/')
+        || raw_token.starts_with("./")
+        || raw_token.starts_with("../")
+        || settings
+            .normalized_path_mapping_keys()
+            .iter()
+            .any(|key| key == raw_token)
+}
+
+fn is_alias_prefix_context(context: &CompletionContext, settings: &CompiledSettings) -> bool {
+    settings
+        .normalized_path_mapping_keys()
+        .iter()
+        .any(|key| mapping_key_supports_prefix_completion(key.as_str(), context.raw_token.as_str()))
 }
 
 fn base_points_to_existing_file(base: &ResolvedBase) -> bool {
@@ -259,7 +307,7 @@ fn read_directory_candidates(base: &ResolvedBase, settings: &CompiledSettings) -
     let mut candidates = Vec::new();
 
     if !settings.disable_up_one_folder()
-        && "..".starts_with(base.prefix.as_str())
+        && synthetic_parent_matches_prefix(base.prefix.as_str())
         && parent_candidate_dir(base).is_some()
     {
         candidates.push(Candidate {
@@ -297,6 +345,10 @@ fn read_directory_candidates(base: &ResolvedBase, settings: &CompiledSettings) -
     candidates
 }
 
+fn synthetic_parent_matches_prefix(prefix: &str) -> bool {
+    prefix == "." || prefix == ".."
+}
+
 #[must_use]
 pub fn path_completion_response(
     text: &str,
@@ -314,6 +366,8 @@ pub fn path_completion_response(
         document_path,
         workspace_roots,
         allow_empty_token,
+        is_auto_trigger: false,
+        trigger_character: None,
         settings,
     };
     PathSenseEngine.complete(&request)
@@ -394,7 +448,6 @@ mod tests {
                 (true, "b_dir".to_string()),
                 (false, "a.txt".to_string()),
                 (false, "b.txt".to_string()),
-                (true, "..".to_string()),
             ]
         );
     }
@@ -423,7 +476,7 @@ mod tests {
             .into_iter()
             .map(|candidate| candidate.name)
             .collect();
-        assert_eq!(names, vec!["..".to_string(), "visible".to_string()]);
+        assert_eq!(names, vec!["visible".to_string()]);
 
         let candidates =
             read_directory_candidates(&base(tmp.path().to_path_buf(), "."), &settings("/"));
@@ -432,6 +485,23 @@ mod tests {
             .map(|candidate| candidate.name)
             .collect();
         assert_eq!(names, vec!["..".to_string(), ".hidden".to_string()]);
+    }
+
+    #[test]
+    fn synthetic_parent_candidate_only_matches_dot_or_double_dot_prefix() {
+        let tmp = tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("nested")).unwrap();
+
+        let empty = read_directory_candidates(&base(tmp.path().to_path_buf(), ""), &settings("/"));
+        assert!(empty.iter().all(|candidate| candidate.name != ".."));
+
+        let single_dot =
+            read_directory_candidates(&base(tmp.path().to_path_buf(), "."), &settings("/"));
+        assert!(single_dot.iter().any(|candidate| candidate.name == ".."));
+
+        let double_dot =
+            read_directory_candidates(&base(tmp.path().to_path_buf(), ".."), &settings("/"));
+        assert!(double_dot.iter().any(|candidate| candidate.name == ".."));
     }
 
     #[test]
@@ -565,8 +635,130 @@ mod tests {
             document_path: Some(document_path.as_path()),
             workspace_roots: &workspace_roots,
             allow_empty_token: false,
+            is_auto_trigger: false,
+            trigger_character: None,
             settings: &settings,
         };
         assert!(PathSenseEngine.complete(&request).is_none());
+    }
+
+    #[test]
+    fn auto_trigger_respects_min_word_length() {
+        let tmp = tempdir().expect("tempdir");
+        let project = tmp.path().join("project");
+        let src = project.join("src");
+        std::fs::create_dir_all(&project).expect("mkdir project");
+        std::fs::write(project.join("readme.md"), "x").expect("write readme");
+        std::fs::write(project.join("release.toml"), "x").expect("write release");
+        std::fs::create_dir_all(&src).expect("mkdir src");
+        let document_path = src.join("config.toml");
+        std::fs::write(&document_path, "path = \"re\"").expect("write config");
+
+        let text = "path = \"re\"";
+        let syntax = SyntaxState::new("TOML", text);
+        let snapshot = syntax.as_ref().map(SyntaxState::snapshot);
+        let workspace_roots = WorkspaceRoots {
+            internal_worktree_root: Some(project),
+            lsp_roots: Vec::new(),
+        };
+        let settings =
+            CompiledSettings::from(PathSenseSettings::from_json_value(serde_json::json!({
+                "min_auto_trigger_word_length": 3
+            })));
+
+        let auto_request = CompletionRequest {
+            text,
+            position: Position::new(0, 10),
+            syntax: snapshot.as_ref(),
+            document_path: Some(document_path.as_path()),
+            workspace_roots: &workspace_roots,
+            allow_empty_token: false,
+            is_auto_trigger: true,
+            trigger_character: None,
+            settings: &settings,
+        };
+        assert!(PathSenseEngine.complete(&auto_request).is_none());
+
+        let manual_request = CompletionRequest {
+            is_auto_trigger: false,
+            ..auto_request
+        };
+        let Some(CompletionResponse::Array(items)) = PathSenseEngine.complete(&manual_request)
+        else {
+            panic!("expected completion items");
+        };
+        let labels = items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"readme.md"));
+        assert!(labels.contains(&"release.toml"));
+    }
+
+    #[test]
+    fn explicit_path_roots_bypass_min_word_length() {
+        let settings =
+            CompiledSettings::from(PathSenseSettings::from_json_value(serde_json::json!({
+                "path_mappings": {
+                    "@assets": "${workspace}/assets"
+                }
+            })));
+
+        for raw_token in ["~", "~/", "/", "./", "../", "@assets", "@a"] {
+            let context = CompletionContext {
+                trigger: crate::context::CompletionTrigger::QuotedString,
+                allow_empty_token: false,
+                document_path: Some(PathBuf::from("/work/project/src/app.ts")),
+                raw_token: raw_token.to_string(),
+                line_prefix: String::new(),
+                insert_prefix: String::new(),
+                replacement_range: tower_lsp::lsp_types::Range::default(),
+                prefix: String::new(),
+            };
+            let request = CompletionRequest {
+                text: "",
+                position: Position::new(0, 0),
+                syntax: None,
+                document_path: context.document_path.as_deref(),
+                workspace_roots: &WorkspaceRoots::default(),
+                allow_empty_token: false,
+                is_auto_trigger: true,
+                trigger_character: None,
+                settings: &settings,
+            };
+
+            assert!(!should_suppress_for_min_auto_trigger(&request, &context));
+        }
+    }
+
+    #[test]
+    fn slash_trigger_bypasses_min_word_length_for_empty_next_segment() {
+        let settings =
+            CompiledSettings::from(PathSenseSettings::from_json_value(serde_json::json!({
+                "min_auto_trigger_word_length": 3
+            })));
+        let context = CompletionContext {
+            trigger: crate::context::CompletionTrigger::QuotedString,
+            allow_empty_token: false,
+            document_path: Some(PathBuf::from("/work/project/src/app.ts")),
+            raw_token: "modules/".to_string(),
+            line_prefix: String::new(),
+            insert_prefix: String::new(),
+            replacement_range: tower_lsp::lsp_types::Range::default(),
+            prefix: String::new(),
+        };
+        let request = CompletionRequest {
+            text: "",
+            position: Position::new(0, 0),
+            syntax: None,
+            document_path: context.document_path.as_deref(),
+            workspace_roots: &WorkspaceRoots::default(),
+            allow_empty_token: false,
+            is_auto_trigger: true,
+            trigger_character: Some('/'),
+            settings: &settings,
+        };
+
+        assert!(!should_suppress_for_min_auto_trigger(&request, &context));
     }
 }

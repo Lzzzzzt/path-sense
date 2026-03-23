@@ -40,7 +40,6 @@ fn request<'a>(
     position: Position,
     syntax: &'a crate::syntax::SyntaxSnapshot,
     document_path: Option<&'a Path>,
-    mapping_keys: &'a [String],
     allow_empty_token: bool,
 ) -> QueryRequest<'a> {
     QueryRequest {
@@ -50,7 +49,6 @@ fn request<'a>(
         },
         tree: &syntax.tree,
         document_path,
-        mapping_keys,
         allow_empty_token,
     }
 }
@@ -294,6 +292,7 @@ fn yaml_plain_scalar_path_like_values_are_supported() {
         ("path: ~/src", 11, "~/src"),
         ("imports: /etc/hos", 17, "/etc/hos"),
         ("- ./modules/dev", 15, "./modules/dev"),
+        ("src: mo", 7, "mo"),
     ] {
         let context = extract(
             text,
@@ -301,7 +300,7 @@ fn yaml_plain_scalar_path_like_values_are_supported() {
             "YAML",
             Some(Path::new("/work/project/config.yaml")),
             false,
-            &[],
+            &[String::from("@assets")],
             None,
         )
         .expect("yaml plain scalar context");
@@ -317,19 +316,6 @@ fn yaml_plain_scalar_rejects_keys_non_paths_and_block_scalars() {
         extract(
             "imports:",
             position(0, 7),
-            "YAML",
-            Some(Path::new("/work/project/config.yaml")),
-            false,
-            &[],
-            None,
-        )
-        .is_none()
-    );
-
-    assert!(
-        extract(
-            "name: hello",
-            position(0, 11),
             "YAML",
             Some(Path::new("/work/project/config.yaml")),
             false,
@@ -382,7 +368,6 @@ fn yaml_handler_only_accepts_value_side_plain_scalars() {
             position(0, 11),
             &snapshot,
             Some(Path::new("/work/project/config.yaml")),
-            &[],
             false,
         ),
         handler,
@@ -393,13 +378,28 @@ fn yaml_handler_only_accepts_value_side_plain_scalars() {
 
     let syntax = SyntaxState::new("YAML", "name: hello").expect("syntax");
     let snapshot = syntax.snapshot();
-    let rejected = extract_context_from_query(
+    let accepted_plain_value = extract_context_from_query(
         request(
             "name: hello",
             position(0, 11),
             &snapshot,
             Some(Path::new("/work/project/config.yaml")),
-            &[],
+            false,
+        ),
+        handler,
+        handler.bare_query().expect("yaml bare query"),
+        CompletionTrigger::BareToken,
+    );
+    assert!(accepted_plain_value.is_some());
+
+    let syntax = SyntaxState::new("YAML", "imports:").expect("syntax");
+    let snapshot = syntax.snapshot();
+    let rejected = extract_context_from_query(
+        request(
+            "imports:",
+            position(0, 7),
+            &snapshot,
+            Some(Path::new("/work/project/config.yaml")),
             false,
         ),
         handler,

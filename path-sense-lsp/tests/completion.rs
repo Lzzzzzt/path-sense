@@ -135,12 +135,25 @@ async fn completion_items(
     uri: &str,
     character: u32,
 ) -> Vec<serde_json::Value> {
+    completion_items_with_trigger(service, uri, character, 1, None).await
+}
+
+async fn completion_items_with_trigger(
+    service: &mut LspService<Backend>,
+    uri: &str,
+    character: u32,
+    trigger_kind: u8,
+    trigger_character: Option<&str>,
+) -> Vec<serde_json::Value> {
     let completion = Request::build("textDocument/completion")
         .id(2)
         .params(json!({
             "textDocument": { "uri": uri },
             "position": { "line": 0, "character": character },
-            "context": { "triggerKind": 1 }
+            "context": {
+                "triggerKind": trigger_kind,
+                "triggerCharacter": trigger_character
+            }
         }))
         .finish();
     let response = service
@@ -153,6 +166,9 @@ async fn completion_items(
         .expect("completion payload");
 
     let result = response.result().expect("completion result");
+    if result.is_null() {
+        return Vec::new();
+    }
     result
         .as_array()
         .cloned()
@@ -225,6 +241,36 @@ fn integration_completion_supports_unquoted_yaml_plain_scalars() {
 
     assert_eq!(labels, vec!["main.rs"]);
     assert_eq!(context.raw_token, "./src/ma");
+}
+
+#[test]
+fn integration_completion_supports_unquoted_yaml_plain_scalars_without_slash() {
+    let tmp = tempdir().expect("tempdir");
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).expect("mkdir");
+    std::fs::create_dir_all(project.join("modules")).expect("mkdir modules");
+    std::fs::write(project.join("main.rs"), "fn main() {}").expect("write main");
+
+    let document_path = project.join("config.yaml");
+    let text = "src: mo";
+    let context = extract(
+        text,
+        position(0, 7),
+        "YAML",
+        document_path.as_path(),
+        false,
+    );
+
+    let engine = PathSenseEngine;
+    let items = engine.items_for_context(
+        &context,
+        &workspace_roots(project.as_path()),
+        &default_settings(),
+    );
+    let labels: Vec<_> = items.iter().map(|item| item.label.as_str()).collect();
+
+    assert_eq!(labels, vec!["modules/"]);
+    assert_eq!(context.raw_token, "mo");
 }
 
 #[test]
@@ -357,6 +403,40 @@ fn integration_completion_supports_tilde_and_path_mappings() {
             }
         })
     }));
+}
+
+#[test]
+fn integration_completion_uses_workspace_root_for_plain_fragments() {
+    let tmp = tempdir().expect("tempdir");
+    let project = tmp.path().join("project");
+    let src = project.join("src");
+    std::fs::create_dir_all(&src).expect("mkdir src");
+    std::fs::write(project.join("readme.md"), "x").expect("write readme");
+    std::fs::create_dir_all(project.join("resources")).expect("mkdir resources");
+    std::fs::write(src.join("read_local.rs"), "x").expect("write local");
+
+    let document_path = src.join("main.rs");
+    let text = r#"let p = "re""#;
+    let cursor = u32::try_from(text.len() - 1).expect("cursor");
+    let context = extract(
+        text,
+        position(0, cursor),
+        "Rust",
+        document_path.as_path(),
+        false,
+    );
+
+    let engine = PathSenseEngine;
+    let items = engine.items_for_context(
+        &context,
+        &workspace_roots(project.as_path()),
+        &default_settings(),
+    );
+    let labels: Vec<_> = items.iter().map(|item| item.label.as_str()).collect();
+
+    assert!(labels.contains(&"readme.md"));
+    assert!(labels.contains(&"resources/"));
+    assert!(!labels.contains(&"read_local.rs"));
 }
 
 #[tokio::test]
@@ -535,4 +615,117 @@ async fn lsp_workspace_configuration_can_disable_directory_suffix_and_enable_ali
     open_document(&mut service, &document_uri, "Rust", document_text).await;
     let items = completion_items(&mut service, &document_uri, 19).await;
     assert_eq!(items[0]["label"].as_str(), Some("logo.svg"));
+}
+
+#[tokio::test]
+async fn lsp_auto_trigger_respects_min_auto_trigger_word_length() {
+    let tmp = tempdir().expect("tempdir");
+    let project = tmp.path().join("project");
+    let src = project.join("src");
+    std::fs::create_dir_all(&src).expect("mkdir src");
+    std::fs::write(project.join("readme.md"), "x").expect("write readme");
+    std::fs::write(project.join("release.toml"), "x").expect("write release");
+
+    let document_uri = format!("file://{}", project.join("src/app.rs").display());
+    let document_text = r#"let path = "re";"#;
+    let cursor = u32::try_from(document_text.find("re").expect("token start") + 2).expect("cursor");
+
+    let (mut service, _socket) = LspService::new(Backend::new);
+    let _ = initialize_service(&mut service, project.as_path()).await;
+
+    let change_configuration = Request::build("workspace/didChangeConfiguration")
+        .params(json!({
+            "settings": {
+                "min_auto_trigger_word_length": 3
+            }
+        }))
+        .finish();
+    let _ = service
+        .ready()
+        .await
+        .expect("service ready")
+        .call(change_configuration)
+        .await
+        .expect("config response");
+
+    open_document(&mut service, &document_uri, "Rust", document_text).await;
+
+    let auto_items =
+        completion_items_with_trigger(&mut service, &document_uri, cursor, 3, None).await;
+    assert!(auto_items.is_empty());
+
+    let manual_items = completion_items(&mut service, &document_uri, cursor).await;
+    let labels = manual_items
+        .iter()
+        .map(|item| item["label"].as_str().expect("label"))
+        .collect::<Vec<_>>();
+    assert!(labels.contains(&"readme.md"));
+    assert!(labels.contains(&"release.toml"));
+}
+
+#[tokio::test]
+async fn lsp_auto_trigger_supports_yaml_plain_scalars_without_slash() {
+    let tmp = tempdir().expect("tempdir");
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(project.join("modules")).expect("mkdir modules");
+    std::fs::write(project.join("main.rs"), "x").expect("write main");
+
+    let document_uri = format!("file://{}", project.join("config.yaml").display());
+    let document_text = "src: mo";
+    let cursor = u32::try_from(document_text.len()).expect("cursor");
+
+    let (mut service, _socket) = LspService::new(Backend::new);
+    let _ = initialize_service(&mut service, project.as_path()).await;
+
+    let change_configuration = Request::build("workspace/didChangeConfiguration")
+        .params(json!({
+            "settings": {
+                "min_auto_trigger_word_length": 1
+            }
+        }))
+        .finish();
+    let _ = service
+        .ready()
+        .await
+        .expect("service ready")
+        .call(change_configuration)
+        .await
+        .expect("config response");
+
+    open_document(&mut service, &document_uri, "YAML", document_text).await;
+
+    let auto_items =
+        completion_items_with_trigger(&mut service, &document_uri, cursor, 2, None).await;
+    let labels = auto_items
+        .iter()
+        .map(|item| item["label"].as_str().expect("label"))
+        .collect::<Vec<_>>();
+    assert!(labels.contains(&"modules/"));
+}
+
+#[tokio::test]
+async fn lsp_slash_trigger_continues_workspace_root_completion_chain() {
+    let tmp = tempdir().expect("tempdir");
+    let project = tmp.path().join("project");
+    let nested = project.join("nested");
+    let modules = project.join("modules");
+    std::fs::create_dir_all(&nested).expect("mkdir nested");
+    std::fs::create_dir_all(modules.join("home-manager")).expect("mkdir home-manager");
+
+    let document_uri = format!("file://{}", nested.join("config.yaml").display());
+    let document_text = "src: modules/";
+    let cursor = u32::try_from(document_text.len()).expect("cursor");
+
+    let (mut service, _socket) = LspService::new(Backend::new);
+    let _ = initialize_service(&mut service, project.as_path()).await;
+
+    open_document(&mut service, &document_uri, "YAML", document_text).await;
+
+    let auto_items =
+        completion_items_with_trigger(&mut service, &document_uri, cursor, 2, Some("/")).await;
+    let labels = auto_items
+        .iter()
+        .map(|item| item["label"].as_str().expect("label"))
+        .collect::<Vec<_>>();
+    assert!(labels.contains(&"home-manager/"));
 }

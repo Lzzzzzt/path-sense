@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::context::CompletionContext;
+use crate::context::{CompletionContext, mapping_key_supports_prefix_completion};
 use crate::settings::{CompiledMappingEntry, CompiledSettings, SlashRoot};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -116,6 +116,19 @@ fn resolve_non_mapping_bases(
         };
     }
 
+    if should_resolve_from_workspace_root(raw_token, settings) {
+        return workspace_roots
+            .workspace_root_for_document(context.document_path.as_deref())
+            .map_or_else(Vec::new, |workspace_root| {
+                vec![resolve_virtual_root(
+                    raw_token,
+                    workspace_root.clone(),
+                    Some(workspace_root),
+                    context.insert_prefix.clone(),
+                )]
+            });
+    }
+
     let Some(document_dir) = context
         .document_path
         .as_deref()
@@ -138,6 +151,19 @@ fn resolve_non_mapping_bases(
         prefix: prefix.to_string(),
         insert_prefix: context.insert_prefix.clone(),
     }]
+}
+
+fn should_resolve_from_workspace_root(raw_token: &str, settings: &CompiledSettings) -> bool {
+    !raw_token.is_empty()
+        && !has_explicit_path_root(raw_token)
+        && !settings
+            .normalized_path_mapping_keys()
+            .iter()
+            .any(|key| key == raw_token || mapping_key_supports_prefix_completion(key, raw_token))
+}
+
+fn has_explicit_path_root(raw_token: &str) -> bool {
+    raw_token.starts_with('~') || raw_token.starts_with('.') || raw_token.starts_with('/')
 }
 
 fn resolve_from_mappings(
@@ -455,6 +481,48 @@ mod tests {
         assert_eq!(resolved[0].prefix, "");
         assert_eq!(resolved[0].insert_prefix, "~/");
         assert!(resolved[0].boundary_root.is_some());
+    }
+
+    #[test]
+    fn plain_token_resolves_from_workspace_root() {
+        let project = Path::new("/work/project");
+        let document = project.join("src/app.rs");
+        let resolved = resolve_bases(
+            &context("rea", &document),
+            &workspace_roots(project),
+            &CompiledSettings::default(),
+        );
+
+        assert_eq!(resolved[0].target_dir, project);
+        assert_eq!(resolved[0].prefix, "rea");
+        assert_eq!(resolved[0].boundary_root, Some(project.to_path_buf()));
+    }
+
+    #[test]
+    fn plain_token_without_workspace_root_returns_no_bases() {
+        let document = Path::new("/work/project/src/app.rs");
+        let resolved = resolve_bases(
+            &context("rea", document),
+            &WorkspaceRoots::default(),
+            &CompiledSettings::default(),
+        );
+
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn slash_separated_plain_token_continues_from_workspace_root() {
+        let project = Path::new("/work/project");
+        let document = project.join("nested/config.yaml");
+        let resolved = resolve_bases(
+            &context("modules/home", &document),
+            &workspace_roots(project),
+            &CompiledSettings::default(),
+        );
+
+        assert_eq!(resolved[0].target_dir, project.join("modules"));
+        assert_eq!(resolved[0].prefix, "home");
+        assert_eq!(resolved[0].boundary_root, Some(project.to_path_buf()));
     }
 
     #[test]

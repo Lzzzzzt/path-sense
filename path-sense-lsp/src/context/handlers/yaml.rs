@@ -4,7 +4,6 @@ use tree_sitter::{Language, Node, Query};
 
 use super::{LanguageHandler, compile_query, quoted_delimiters};
 use crate::context::query::node_contains_node;
-use crate::context::token::path_like_token_is_supported;
 use crate::context::types::QueryRequest;
 
 pub(crate) struct Yaml;
@@ -28,12 +27,11 @@ impl LanguageHandler for Yaml {
 
     fn bare_node_is_supported(
         &self,
-        request: &QueryRequest<'_>,
+        _request: &QueryRequest<'_>,
         node: Node<'_>,
-        token: &str,
+        _token: &str,
     ) -> bool {
         yaml_plain_scalar_is_supported_position(node)
-            && path_like_token_is_supported(token, request.mapping_keys)
     }
 }
 

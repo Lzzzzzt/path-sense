@@ -55,6 +55,7 @@ pub struct PathSenseSettings {
     pub slash_root: SlashRoot,
     pub path_mappings: BTreeMap<String, PathMapping>,
     pub trigger_outside_strings: bool,
+    pub min_auto_trigger_word_length: usize,
     pub path_separators: String,
     pub disable_up_one_folder: bool,
     pub ignored_files_patterns: Vec<String>,
@@ -96,6 +97,7 @@ impl Default for PathSenseSettings {
             slash_root: SlashRoot::Filesystem,
             path_mappings: BTreeMap::new(),
             trigger_outside_strings: false,
+            min_auto_trigger_word_length: 2,
             path_separators: " \t({[".to_string(),
             disable_up_one_folder: false,
             ignored_files_patterns: Vec::new(),
@@ -147,6 +149,11 @@ impl CompiledSettings {
     #[must_use]
     pub fn path_separators(&self) -> &str {
         self.raw.path_separators.as_str()
+    }
+
+    #[must_use]
+    pub fn min_auto_trigger_word_length(&self) -> usize {
+        self.raw.min_auto_trigger_word_length
     }
 
     #[must_use]
@@ -306,6 +313,7 @@ mod tests {
         assert_eq!(settings.slash_root, SlashRoot::Filesystem);
         assert_eq!(settings.path_separators, " \t({[");
         assert_eq!(settings.directory_suffix, "/");
+        assert_eq!(settings.min_auto_trigger_word_length, 2);
         assert!(!settings.trigger_outside_strings);
         assert!(!settings.disable_up_one_folder);
         assert!(settings.path_mappings.is_empty());
@@ -329,6 +337,7 @@ mod tests {
                 }
             },
             "trigger_outside_strings": true,
+            "min_auto_trigger_word_length": 4,
             "path_separators": " \t(",
             "disable_up_one_folder": true,
             "ignored_files_patterns": ["vendor/**"],
@@ -338,6 +347,7 @@ mod tests {
 
         assert_eq!(settings.slash_root, SlashRoot::Filesystem);
         assert!(settings.trigger_outside_strings);
+        assert_eq!(settings.min_auto_trigger_word_length, 4);
         assert_eq!(settings.path_separators, " \t(");
         assert!(settings.disable_up_one_folder);
         assert_eq!(settings.ignored_files_patterns, vec!["vendor/**"]);

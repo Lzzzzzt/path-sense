@@ -25,7 +25,7 @@ pub fn extract_completion_context(
     syntax: Option<&SyntaxSnapshot>,
     document_path: Option<&Path>,
     allow_empty_token: bool,
-    mapping_keys: &[String],
+    _mapping_keys: &[String],
     outside_strings: Option<&OutsideStringsConfig<'_>>,
 ) -> Option<CompletionContext> {
     let cursor = CursorLocation {
@@ -39,7 +39,6 @@ pub fn extract_completion_context(
             cursor,
             tree: &syntax.tree,
             document_path,
-            mapping_keys,
             allow_empty_token,
         };
 

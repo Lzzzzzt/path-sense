@@ -70,6 +70,7 @@ Path semantics and filtering can also be configured:
     "path-sense": {
       "settings": {
         "slash_root": "workspace",
+        "min_auto_trigger_word_length": 2,
         "path_mappings": {
           "@assets": "${workspace}/assets",
           "/test": {
@@ -95,11 +96,14 @@ Path semantics and filtering can also be configured:
 Notes:
 
 - `slash_root` defaults to `"filesystem"`. Set it to `"workspace"` to resolve `/...` relative to the current workspace root.
+- `min_auto_trigger_word_length` defaults to `2` and only applies to automatically triggered completions. Manual completion requests are not gated.
+- Automatic path completion is triggered on path punctuation and common filename word characters (`a-z`, `A-Z`, `0-9`, `_`, `-`), so `min_auto_trigger_word_length` also applies to plain filename fragments.
 - `path_mappings` supports a single string, an array of strings, or conditional mappings with `when`.
 - Punctuation-prefixed `path_mappings` keys such as `@assets` or `$lib` also contribute their leading character to the LSP trigger set, so typing that prefix can reopen completion for alias roots.
 - Supported mapping variables are `${home}`, `${workspace}`, `${folder}`, `${fileDirname}`, and `${relativeFileDirname}`.
 - `trigger_outside_strings` is off by default. When enabled, Path Sense can also offer completions from conservative lexical fallback contexts in supported languages.
 - `disable_up_one_folder = false` keeps the synthetic `..` entry enabled.
+- Plain string tokens without `/` are resolved against the workspace root rather than the current file directory.
 
 If you override `languages.<Language>.language_servers` in Zed, that list replaces the default extension-provided servers for that language. Add `path-sense` explicitly, or include `"..."` to keep the default servers.
 

@@ -38,6 +38,5 @@ pub(crate) struct QueryRequest<'a> {
     pub(crate) cursor: CursorLocation,
     pub(crate) tree: &'a Tree,
     pub(crate) document_path: Option<&'a Path>,
-    pub(crate) mapping_keys: &'a [String],
     pub(crate) allow_empty_token: bool,
 }

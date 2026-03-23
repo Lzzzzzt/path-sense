@@ -153,6 +153,12 @@ impl LanguageServer for Backend {
             .context
             .as_ref()
             .is_none_or(|context| matches!(context.trigger_kind, CompletionTriggerKind::INVOKED));
+        let is_auto_trigger = !allow_empty_token;
+        let trigger_character = params
+            .context
+            .as_ref()
+            .and_then(|context| context.trigger_character.as_deref())
+            .and_then(|character| character.chars().next());
         let settings = self.settings().await;
         let workspace_roots = self.workspace_roots().await;
 
@@ -163,6 +169,8 @@ impl LanguageServer for Backend {
             document_path: snapshot.path.as_deref(),
             workspace_roots: &workspace_roots,
             allow_empty_token,
+            is_auto_trigger,
+            trigger_character,
             settings: settings.as_ref(),
         };
         Ok(self.engine.complete(&request))
@@ -192,7 +200,8 @@ fn roots_from_initialize_params(params: &InitializeParams) -> Vec<PathBuf> {
 }
 
 fn completion_trigger_characters(alias_trigger_characters: &[String]) -> Vec<String> {
-    let mut characters = vec!["/".to_string(), ".".to_string(), "~".to_string()];
+    let mut characters = word_trigger_characters();
+    characters.extend(["/".to_string(), ".".to_string(), "~".to_string()]);
     let mut seen = characters.iter().cloned().collect::<BTreeSet<_>>();
 
     for character in alias_trigger_characters {
@@ -205,6 +214,13 @@ fn completion_trigger_characters(alias_trigger_characters: &[String]) -> Vec<Str
     }
 
     characters
+}
+
+fn word_trigger_characters() -> Vec<String> {
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+        .chars()
+        .map(|character| character.to_string())
+        .collect()
 }
 
 pub async fn run() {
@@ -220,20 +236,29 @@ mod tests {
 
     #[test]
     fn trigger_characters_include_alias_prefixes_without_duplicates() {
+        let characters = completion_trigger_characters(&[
+            "@".to_string(),
+            "$".to_string(),
+            "/".to_string(),
+            "xx".to_string(),
+        ]);
+
+        assert!(characters.contains(&"a".to_string()));
+        assert!(characters.contains(&"Z".to_string()));
+        assert!(characters.contains(&"0".to_string()));
+        assert!(characters.contains(&"_".to_string()));
+        assert!(characters.contains(&"-".to_string()));
+        assert!(characters.contains(&"/".to_string()));
+        assert!(characters.contains(&".".to_string()));
+        assert!(characters.contains(&"~".to_string()));
+        assert!(characters.contains(&"@".to_string()));
+        assert!(characters.contains(&"$".to_string()));
         assert_eq!(
-            completion_trigger_characters(&[
-                "@".to_string(),
-                "$".to_string(),
-                "/".to_string(),
-                "xx".to_string(),
-            ]),
-            vec![
-                "/".to_string(),
-                ".".to_string(),
-                "~".to_string(),
-                "@".to_string(),
-                "$".to_string(),
-            ]
+            characters
+                .iter()
+                .filter(|character| character.as_str() == "/")
+                .count(),
+            1
         );
     }
 }
