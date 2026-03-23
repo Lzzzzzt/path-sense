@@ -15,6 +15,12 @@ Completion documentation is loaded lazily via `completionItem/resolve`. Text fil
 1. In Zed, use `Extensions: Install Dev Extension` and point it at this worktree.
 1. Zed will resolve the sidecar in this order: `lsp.path-sense.binary.path`, `<worktree>/target/debug/path-sense-lsp`, then `PATH`.
 
+## CI/CD
+
+GitHub Actions runs CI on pull requests to `master` and on direct pushes to `master`. The CI workflow checks formatting, tests, clippy, the WASM extension target, and bench compilation.
+
+Sidecar releases are created from semver tags such as `v0.1.0`. A matching tag builds `path-sense-lsp` for macOS and Linux on `x86_64` and `aarch64`, publishes a GitHub Release, and uploads the sidecar tarballs plus `SHA256SUMS.txt`.
+
 ## Benchmark
 
 Run the local performance suite with:

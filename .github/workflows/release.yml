@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  validate-version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.validate.outputs.version }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate tag version
+        id: validate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(grep -m1 '^version = "' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
+          extension_version="$(grep -m1 '^version = "' extension.toml | sed -E 's/version = "([^"]+)"/\1/')"
+
+          if [[ "${tag_version}" != "${cargo_version}" ]]; then
+            echo "Tag version ${tag_version} does not match Cargo.toml version ${cargo_version}" >&2
+            exit 1
+          fi
+
+          if [[ "${tag_version}" != "${extension_version}" ]]; then
+            echo "Tag version ${tag_version} does not match extension.toml version ${extension_version}" >&2
+            exit 1
+          fi
+
+          echo "version=${tag_version}" >> "${GITHUB_OUTPUT}"
+
+  build-sidecar:
+    needs: validate-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Build sidecar
+        run: cargo build --release -p path-sense-lsp
+
+      - name: Package sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${{ needs.validate-version.outputs.version }}"
+          asset_name="path-sense-lsp-v${version}-${{ matrix.target }}.tar.gz"
+
+          mkdir -p dist/package
+          cp target/release/path-sense-lsp dist/package/path-sense-lsp
+          chmod +x dist/package/path-sense-lsp
+          tar -C dist/package -czf "dist/${asset_name}" path-sense-lsp
+
+      - name: Upload packaged sidecar
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish-release:
+    needs:
+      - validate-version
+      - build-sidecar
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download packaged sidecars
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Ensure GitHub CLI is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v gh >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          sudo apt-get update
+          sudo apt-get install -y gh
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum path-sense-lsp-v${{ needs.validate-version.outputs.version }}-*.tar.gz > SHA256SUMS.txt
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz dist/SHA256SUMS.txt \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes
