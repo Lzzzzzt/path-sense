@@ -64,10 +64,13 @@ pub(crate) fn attach_completion_documentation(item: &mut CompletionItem) {
 
 fn documentation_for_data(data: &CompletionItemData) -> Documentation {
     match data.kind {
-        CompletionItemPreviewKind::File => preview_file_documentation(data)
-            .unwrap_or_else(|| fallback_completion_documentation(data.annotation.as_str(), data.name.as_str())),
+        CompletionItemPreviewKind::File => preview_file_documentation(data).unwrap_or_else(|| {
+            fallback_completion_documentation(data.annotation.as_str(), data.name.as_str())
+        }),
         CompletionItemPreviewKind::Directory => preview_directory_documentation(data)
-            .unwrap_or_else(|| fallback_completion_documentation(data.annotation.as_str(), data.name.as_str())),
+            .unwrap_or_else(|| {
+                fallback_completion_documentation(data.annotation.as_str(), data.name.as_str())
+            }),
     }
 }
 
@@ -244,7 +247,8 @@ fn preview_directory(path: &Path) -> Option<String> {
         .collect::<Vec<_>>();
 
     entries.sort_by(|left, right| {
-        right.1
+        right
+            .1
             .cmp(&left.1)
             .then_with(|| left.0.to_lowercase().cmp(&right.0.to_lowercase()))
     });
@@ -314,10 +318,10 @@ mod tests {
         std::fs::write(&file, "line one\nline two\nline three\nline four\n").expect("write");
 
         let mut item = CompletionItem {
-            data: Some(serde_json::to_value(completion_item_data(
-                &file, false, "File", "sample.txt",
-            ))
-            .expect("data")),
+            data: Some(
+                serde_json::to_value(completion_item_data(&file, false, "File", "sample.txt"))
+                    .expect("data"),
+            ),
             documentation: Some(fallback_completion_documentation("File", "sample.txt")),
             ..CompletionItem::default()
         };
@@ -341,13 +345,17 @@ mod tests {
 
         for file in [&utf8, &utf16] {
             let mut item = CompletionItem {
-                data: Some(serde_json::to_value(completion_item_data(
-                    file,
-                    false,
-                    "File",
-                    file.file_name().and_then(|name| name.to_str()).unwrap_or("file"),
-                ))
-                .expect("data")),
+                data: Some(
+                    serde_json::to_value(completion_item_data(
+                        file,
+                        false,
+                        "File",
+                        file.file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("file"),
+                    ))
+                    .expect("data"),
+                ),
                 documentation: Some(fallback_completion_documentation("File", "file")),
                 ..CompletionItem::default()
             };
@@ -366,10 +374,10 @@ mod tests {
 
         let fallback = fallback_completion_documentation("File", "blob.bin");
         let mut item = CompletionItem {
-            data: Some(serde_json::to_value(completion_item_data(
-                &file, false, "File", "blob.bin",
-            ))
-            .expect("data")),
+            data: Some(
+                serde_json::to_value(completion_item_data(&file, false, "File", "blob.bin"))
+                    .expect("data"),
+            ),
             documentation: Some(fallback.clone()),
             ..CompletionItem::default()
         };
@@ -392,10 +400,10 @@ mod tests {
         }
 
         let mut item = CompletionItem {
-            data: Some(serde_json::to_value(completion_item_data(
-                &directory, true, "Directory", "src",
-            ))
-            .expect("data")),
+            data: Some(
+                serde_json::to_value(completion_item_data(&directory, true, "Directory", "src"))
+                    .expect("data"),
+            ),
             documentation: Some(fallback_completion_documentation("Directory", "src")),
             ..CompletionItem::default()
         };

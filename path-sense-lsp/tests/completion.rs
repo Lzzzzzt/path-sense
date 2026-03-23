@@ -220,8 +220,7 @@ fn integration_completion_lists_files_in_directory() {
         false,
     );
 
-    let engine = PathSenseEngine;
-    let items = engine.items_for_context(
+    let items = PathSenseEngine::items_for_context(
         &context,
         &workspace_roots(project.as_path()),
         &default_settings(),
@@ -252,8 +251,7 @@ fn integration_completion_supports_contains_matching_with_prefix_priority() {
         false,
     );
 
-    let engine = PathSenseEngine;
-    let items = engine.items_for_context(
+    let items = PathSenseEngine::items_for_context(
         &context,
         &workspace_roots(project.as_path()),
         &default_settings(),
@@ -284,8 +282,7 @@ fn integration_completion_supports_unquoted_yaml_plain_scalars() {
         false,
     );
 
-    let engine = PathSenseEngine;
-    let items = engine.items_for_context(
+    let items = PathSenseEngine::items_for_context(
         &context,
         &workspace_roots(project.as_path()),
         &default_settings(),
@@ -306,16 +303,9 @@ fn integration_completion_supports_unquoted_yaml_plain_scalars_without_slash() {
 
     let document_path = project.join("config.yaml");
     let text = "src: mo";
-    let context = extract(
-        text,
-        position(0, 7),
-        "YAML",
-        document_path.as_path(),
-        false,
-    );
+    let context = extract(text, position(0, 7), "YAML", document_path.as_path(), false);
 
-    let engine = PathSenseEngine;
-    let items = engine.items_for_context(
+    let items = PathSenseEngine::items_for_context(
         &context,
         &workspace_roots(project.as_path()),
         &default_settings(),
@@ -344,8 +334,7 @@ fn integration_completion_shows_hidden_entries_when_prefixed_with_dot() {
         false,
     );
 
-    let engine = PathSenseEngine;
-    let items = engine.items_for_context(
+    let items = PathSenseEngine::items_for_context(
         &context,
         &workspace_roots(project.as_path()),
         &default_settings(),
@@ -372,8 +361,11 @@ fn integration_completion_uses_filesystem_root_for_absolute_paths_by_default() {
         false,
     );
 
-    let engine = PathSenseEngine;
-    let items = engine.items_for_context(&context, &WorkspaceRoots::default(), &default_settings());
+    let items = PathSenseEngine::items_for_context(
+        &context,
+        &WorkspaceRoots::default(),
+        &default_settings(),
+    );
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].label, "config.txt");
 }
@@ -398,8 +390,11 @@ fn integration_completion_can_use_workspace_root_for_absolute_paths() {
         "slash_root": "workspace"
     })));
 
-    let engine = PathSenseEngine;
-    let items = engine.items_for_context(&context, &workspace_roots(project.as_path()), &settings);
+    let items = PathSenseEngine::items_for_context(
+        &context,
+        &workspace_roots(project.as_path()),
+        &settings,
+    );
     let labels: Vec<_> = items.iter().map(|item| item.label.as_str()).collect();
     assert_eq!(labels, vec!["config.txt"]);
 }
@@ -429,8 +424,11 @@ fn integration_completion_supports_tilde_and_path_mappings() {
         false,
     );
 
-    let engine = PathSenseEngine;
-    let items = engine.items_for_context(&context, &workspace_roots(project.as_path()), &settings);
+    let items = PathSenseEngine::items_for_context(
+        &context,
+        &workspace_roots(project.as_path()),
+        &settings,
+    );
     let labels: Vec<_> = items.iter().map(|item| item.label.as_str()).collect();
     assert_eq!(labels, vec!["logo.svg"]);
 
@@ -442,7 +440,7 @@ fn integration_completion_supports_tilde_and_path_mappings() {
         document_path.as_path(),
         true,
     );
-    let tilde_items = engine.items_for_context(
+    let tilde_items = PathSenseEngine::items_for_context(
         &tilde_context,
         &workspace_roots(project.as_path()),
         &settings,
@@ -479,8 +477,7 @@ fn integration_completion_uses_workspace_root_for_plain_fragments() {
         false,
     );
 
-    let engine = PathSenseEngine;
-    let items = engine.items_for_context(
+    let items = PathSenseEngine::items_for_context(
         &context,
         &workspace_roots(project.as_path()),
         &default_settings(),

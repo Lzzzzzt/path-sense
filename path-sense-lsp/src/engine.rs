@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
-use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -9,9 +9,7 @@ use tower_lsp::lsp_types::{
     CompletionTextEdit, InsertTextFormat, Position, TextEdit,
 };
 
-use crate::completion_documentation::{
-    completion_item_data, fallback_completion_documentation,
-};
+use crate::completion_documentation::{completion_item_data, fallback_completion_documentation};
 use crate::context::{
     CompletionContext, OutsideStringsConfig, extract_completion_context,
     mapping_key_supports_prefix_completion,
@@ -31,8 +29,7 @@ pub struct CompletionRequest<'a> {
     pub syntax: Option<&'a SyntaxSnapshot>,
     pub document_path: Option<&'a Path>,
     pub workspace_roots: &'a WorkspaceRoots,
-    pub allow_empty_token: bool,
-    pub is_auto_trigger: bool,
+    pub is_manual_trigger: bool,
     pub trigger_character: Option<char>,
     pub settings: &'a CompiledSettings,
 }
@@ -54,7 +51,7 @@ impl PathSenseEngine {
             request.position,
             request.syntax,
             request.document_path,
-            request.allow_empty_token,
+            request.is_manual_trigger,
             outside_strings.as_ref(),
         )?;
 
@@ -66,11 +63,11 @@ impl PathSenseEngine {
         {
             return Some(CompletionResponse::Array(Vec::new()));
         }
-        if should_suppress_for_min_auto_trigger(request, &context) {
+        if should_suppress_for_min_auto_trigger(request, &context, mapping_keys) {
             return None;
         }
 
-        let mapping_items = self.items_for_mapping_prefixes(&context, request.settings);
+        let mapping_items = Self::mapping_prefix_items(&context, mapping_keys, request.settings);
         if !mapping_items.is_empty() {
             return Some(CompletionResponse::Array(mapping_items));
         }
@@ -85,14 +82,12 @@ impl PathSenseEngine {
     }
 
     #[must_use]
-    pub fn items_for_bases(
-        &self,
+    pub(crate) fn items_for_bases(
         bases: &[ResolvedBase],
         replacement_range: tower_lsp::lsp_types::Range,
         settings: &CompiledSettings,
     ) -> Vec<CompletionItem> {
-        Self::completion_items_for_bases(bases, replacement_range, settings)
-            .0
+        Self::completion_items_for_bases(bases, replacement_range, settings).0
     }
 
     fn completion_items_for_bases(
@@ -141,40 +136,40 @@ impl PathSenseEngine {
 
     #[must_use]
     pub fn items_for_context(
-        &self,
         context: &CompletionContext,
         workspace_roots: &WorkspaceRoots,
         settings: &CompiledSettings,
     ) -> Vec<CompletionItem> {
-        let mapping_items = self.items_for_mapping_prefixes(context, settings);
+        let mapping_items =
+            Self::mapping_prefix_items(context, settings.normalized_path_mapping_keys(), settings);
         if !mapping_items.is_empty() {
             return mapping_items;
         }
 
         let bases = resolve_bases(context, workspace_roots, settings);
-        self.items_for_bases(&bases, context.replacement_range, settings)
+        Self::items_for_bases(&bases, context.replacement_range, settings)
     }
 
     #[must_use]
     pub fn items_for_mapping_prefixes(
-        &self,
         context: &CompletionContext,
         settings: &CompiledSettings,
     ) -> Vec<CompletionItem> {
-        let mut candidates = settings
-            .normalized_path_mapping_keys()
+        Self::mapping_prefix_items(context, settings.normalized_path_mapping_keys(), settings)
+    }
+
+    fn mapping_prefix_items(
+        context: &CompletionContext,
+        mapping_keys: &[String],
+        settings: &CompiledSettings,
+    ) -> Vec<CompletionItem> {
+        let mut candidates = mapping_keys
             .iter()
             .filter(|key| key.as_str() != context.raw_token.as_str())
             .filter(|key| {
                 mapping_key_supports_prefix_completion(key.as_str(), context.raw_token.as_str())
             })
-            .map(|key| Candidate {
-                name: key.clone(),
-                is_dir: true,
-                path: None,
-                insert_prefix: String::new(),
-                match_quality: MatchQuality::Prefix,
-            })
+            .map(|key| Candidate::new(key.clone(), true, None, String::new(), MatchQuality::Prefix))
             .collect::<Vec<_>>();
 
         candidates.sort_by(compare_candidates);
@@ -189,57 +184,51 @@ impl PathSenseEngine {
 fn should_suppress_for_min_auto_trigger(
     request: &CompletionRequest<'_>,
     context: &CompletionContext,
+    mapping_keys: &[String],
 ) -> bool {
-    request.is_auto_trigger
-        && !bypasses_min_auto_trigger(request, context, request.settings)
+    !request.is_manual_trigger
+        && !bypasses_min_auto_trigger(request, context, mapping_keys)
         && context.prefix.chars().count() < request.settings.min_auto_trigger_word_length()
 }
 
 fn bypasses_min_auto_trigger(
     request: &CompletionRequest<'_>,
     context: &CompletionContext,
-    settings: &CompiledSettings,
+    mapping_keys: &[String],
 ) -> bool {
     is_path_separator_trigger(request.trigger_character)
-        || is_explicit_path_root(context, settings)
-        || is_alias_prefix_context(context, settings)
+        || is_explicit_path_root(context, mapping_keys)
+        || is_alias_prefix_context(context, mapping_keys)
 }
 
 fn is_path_separator_trigger(trigger_character: Option<char>) -> bool {
     matches!(trigger_character, Some('/' | '.' | '~'))
 }
 
-fn is_explicit_path_root(context: &CompletionContext, settings: &CompiledSettings) -> bool {
+fn is_explicit_path_root(context: &CompletionContext, mapping_keys: &[String]) -> bool {
     let raw_token = context.raw_token.as_str();
     raw_token == "~"
         || raw_token.starts_with("~/")
         || raw_token.starts_with('/')
         || raw_token.starts_with("./")
         || raw_token.starts_with("../")
-        || settings
-            .normalized_path_mapping_keys()
-            .iter()
-            .any(|key| key == raw_token)
+        || mapping_keys.iter().any(|key| key == raw_token)
 }
 
-fn is_alias_prefix_context(context: &CompletionContext, settings: &CompiledSettings) -> bool {
-    settings
-        .normalized_path_mapping_keys()
+fn is_alias_prefix_context(context: &CompletionContext, mapping_keys: &[String]) -> bool {
+    mapping_keys
         .iter()
         .any(|key| mapping_key_supports_prefix_completion(key.as_str(), context.raw_token.as_str()))
 }
 
 fn base_points_to_existing_file(base: &ResolvedBase) -> bool {
-    fs::metadata(normalized_target_path(base)).is_ok_and(|metadata| metadata.is_file())
-}
-
-fn normalized_target_path(base: &ResolvedBase) -> PathBuf {
-    base.target_dir.components().collect()
+    fs::metadata(&base.target_dir).is_ok_and(|metadata| metadata.is_file())
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct Candidate {
     name: String,
+    sort_name: String,
     is_dir: bool,
     path: Option<PathBuf>,
     insert_prefix: String,
@@ -253,15 +242,22 @@ enum MatchQuality {
 }
 
 impl Candidate {
-    fn annotation(&self) -> &'static str {
-        if self.is_dir { "Directory" } else { "File" }
-    }
+    fn new(
+        name: String,
+        is_dir: bool,
+        path: Option<PathBuf>,
+        insert_prefix: String,
+        match_quality: MatchQuality,
+    ) -> Self {
+        let sort_name = name.to_lowercase();
 
-    fn label(&self) -> String {
-        if self.is_dir {
-            format!("{}/", self.name)
-        } else {
-            self.name.clone()
+        Self {
+            name,
+            sort_name,
+            is_dir,
+            path,
+            insert_prefix,
+            match_quality,
         }
     }
 
@@ -280,32 +276,47 @@ impl Candidate {
         range: tower_lsp::lsp_types::Range,
         settings: &CompiledSettings,
     ) -> CompletionItem {
-        let annotation = self.annotation().to_string();
-        let insert_text = if self.is_dir {
+        let Self {
+            name,
+            sort_name,
+            is_dir,
+            path,
+            insert_prefix,
+            match_quality,
+        } = self;
+        let annotation = if is_dir { "Directory" } else { "File" }.to_string();
+        let sort_bucket = match (name == "..", match_quality, is_dir) {
+            (true, _, _) => 4,
+            (false, MatchQuality::Prefix, true) => 0,
+            (false, MatchQuality::Prefix, false) => 1,
+            (false, MatchQuality::Contains, true) => 2,
+            (false, MatchQuality::Contains, false) => 3,
+        };
+        let insert_text = if is_dir {
             format!(
                 "{0}{1}{2}",
-                self.insert_prefix,
-                self.name,
+                insert_prefix,
+                name,
                 settings.directory_suffix()
             )
         } else {
-            format!("{}{}", self.insert_prefix, self.name)
+            format!("{insert_prefix}{name}")
         };
-        let label = self.label();
+        let label = if is_dir {
+            format!("{name}/")
+        } else {
+            name.clone()
+        };
 
         CompletionItem {
             label,
-            kind: Some(if self.is_dir {
+            kind: Some(if is_dir {
                 CompletionItemKind::FOLDER
             } else {
                 CompletionItemKind::FILE
             }),
-            sort_text: Some(format!(
-                "{}{}",
-                self.sort_bucket(),
-                self.name.to_lowercase()
-            )),
-            filter_text: Some(self.name.clone()),
+            sort_text: Some(format!("{sort_bucket}{sort_name}")),
+            filter_text: Some(name.clone()),
             label_details: Some(CompletionItemLabelDetails {
                 detail: None,
                 description: Some(annotation.clone()),
@@ -313,24 +324,23 @@ impl Candidate {
             detail: Some(annotation.clone()),
             documentation: Some(fallback_completion_documentation(
                 annotation.as_str(),
-                self.name.as_str(),
+                name.as_str(),
             )),
-            data: self
-                .path
-                .as_deref()
-                .and_then(|path| serde_json::to_value(completion_item_data(
+            data: path.as_deref().and_then(|path| {
+                serde_json::to_value(completion_item_data(
                     path,
-                    self.is_dir,
+                    is_dir,
                     annotation.as_str(),
-                    self.name.as_str(),
+                    name.as_str(),
                 ))
-                .ok()),
+                .ok()
+            }),
             text_edit: Some(CompletionTextEdit::Edit(TextEdit {
                 range,
                 new_text: insert_text,
             })),
             insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
-            command: (self.is_dir && settings.should_retrigger_after_directory_completion()).then(
+            command: (is_dir && settings.should_retrigger_after_directory_completion()).then(
                 || {
                     Command::new(
                         "Trigger path completions".to_string(),
@@ -347,7 +357,7 @@ impl Candidate {
 fn compare_candidates(left: &Candidate, right: &Candidate) -> Ordering {
     left.sort_bucket()
         .cmp(&right.sort_bucket())
-        .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+        .then_with(|| left.sort_name.cmp(&right.sort_name))
 }
 
 fn read_directory_candidates(base: &ResolvedBase, settings: &CompiledSettings) -> Vec<Candidate> {
@@ -358,13 +368,13 @@ fn read_directory_candidates(base: &ResolvedBase, settings: &CompiledSettings) -
         && synthetic_parent_matches_prefix(base.prefix.as_str())
         && parent_candidate_dir(base).is_some()
     {
-        candidates.push(Candidate {
-            name: "..".to_string(),
-            is_dir: true,
-            path: parent_candidate_dir(base),
-            insert_prefix: base.insert_prefix.clone(),
-            match_quality: MatchQuality::Prefix,
-        });
+        candidates.push(Candidate::new(
+            "..".to_string(),
+            true,
+            parent_candidate_dir(base),
+            base.insert_prefix.clone(),
+            MatchQuality::Prefix,
+        ));
     }
 
     let Ok(entries) = fs::read_dir(&base.target_dir) else {
@@ -385,13 +395,13 @@ fn read_directory_candidates(base: &ResolvedBase, settings: &CompiledSettings) -
         };
 
         let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
-        candidates.push(Candidate {
+        candidates.push(Candidate::new(
             name,
             is_dir,
-            path: Some(entry.path()),
-            insert_prefix: base.insert_prefix.clone(),
+            Some(entry.path()),
+            base.insert_prefix.clone(),
             match_quality,
-        });
+        ));
     }
 
     candidates
@@ -429,8 +439,7 @@ pub fn path_completion_response(
         syntax,
         document_path,
         workspace_roots,
-        allow_empty_token,
-        is_auto_trigger: false,
+        is_manual_trigger: allow_empty_token,
         trigger_character: None,
         settings,
     };
@@ -544,13 +553,13 @@ mod tests {
 
     #[test]
     fn synthetic_parent_candidate_uses_lowest_sort_text() {
-        let item = Candidate {
-            name: "..".to_string(),
-            is_dir: true,
-            path: None,
-            insert_prefix: String::new(),
-            match_quality: MatchQuality::Prefix,
-        }
+        let item = Candidate::new(
+            "..".to_string(),
+            true,
+            None,
+            String::new(),
+            MatchQuality::Prefix,
+        )
         .into_completion_item(tower_lsp::lsp_types::Range::default(), &settings("/"));
 
         assert_eq!(item.sort_text.as_deref(), Some("4.."));
@@ -601,13 +610,13 @@ mod tests {
 
     #[test]
     fn completion_items_attach_directory_suffix() {
-        let candidate = Candidate {
-            name: "src".to_string(),
-            is_dir: true,
-            path: None,
-            insert_prefix: String::new(),
-            match_quality: MatchQuality::Prefix,
-        };
+        let candidate = Candidate::new(
+            "src".to_string(),
+            true,
+            None,
+            String::new(),
+            MatchQuality::Prefix,
+        );
         let item =
             candidate.into_completion_item(tower_lsp::lsp_types::Range::default(), &settings("/"));
         assert_eq!(item.label, "src/");
@@ -630,50 +639,56 @@ mod tests {
     #[test]
     fn completion_items_include_resolve_data_for_real_directory_candidates() {
         let candidate_path = PathBuf::from("/tmp/src");
-        let candidate = Candidate {
-            name: "src".to_string(),
-            is_dir: true,
-            path: Some(candidate_path.clone()),
-            insert_prefix: String::new(),
-            match_quality: MatchQuality::Prefix,
-        };
+        let candidate = Candidate::new(
+            "src".to_string(),
+            true,
+            Some(candidate_path.clone()),
+            String::new(),
+            MatchQuality::Prefix,
+        );
 
         let item =
             candidate.into_completion_item(tower_lsp::lsp_types::Range::default(), &settings("/"));
         let data = item.data.expect("completion data");
 
-        assert_eq!(data["path"].as_str(), Some(candidate_path.to_string_lossy().as_ref()));
+        assert_eq!(
+            data["path"].as_str(),
+            Some(candidate_path.to_string_lossy().as_ref())
+        );
         assert_eq!(data["kind"].as_str(), Some("directory"));
     }
 
     #[test]
     fn completion_items_include_resolve_data_for_real_file_candidates() {
         let candidate_path = PathBuf::from("/tmp/src/main.rs");
-        let candidate = Candidate {
-            name: "main.rs".to_string(),
-            is_dir: false,
-            path: Some(candidate_path.clone()),
-            insert_prefix: String::new(),
-            match_quality: MatchQuality::Prefix,
-        };
+        let candidate = Candidate::new(
+            "main.rs".to_string(),
+            false,
+            Some(candidate_path.clone()),
+            String::new(),
+            MatchQuality::Prefix,
+        );
 
         let item =
             candidate.into_completion_item(tower_lsp::lsp_types::Range::default(), &settings("/"));
         let data = item.data.expect("completion data");
 
-        assert_eq!(data["path"].as_str(), Some(candidate_path.to_string_lossy().as_ref()));
+        assert_eq!(
+            data["path"].as_str(),
+            Some(candidate_path.to_string_lossy().as_ref())
+        );
         assert_eq!(data["kind"].as_str(), Some("file"));
     }
 
     #[test]
     fn tilde_context_preserves_home_prefix_in_insert_text() {
-        let candidate = Candidate {
-            name: "Documents".to_string(),
-            is_dir: true,
-            path: None,
-            insert_prefix: "~/".to_string(),
-            match_quality: MatchQuality::Prefix,
-        };
+        let candidate = Candidate::new(
+            "Documents".to_string(),
+            true,
+            None,
+            "~/".to_string(),
+            MatchQuality::Prefix,
+        );
         let item =
             candidate.into_completion_item(tower_lsp::lsp_types::Range::default(), &settings("/"));
         let tower_lsp::lsp_types::CompletionTextEdit::Edit(edit) =
@@ -686,13 +701,13 @@ mod tests {
 
     #[test]
     fn directory_suffix_can_be_disabled() {
-        let candidate = Candidate {
-            name: "src".to_string(),
-            is_dir: true,
-            path: None,
-            insert_prefix: String::new(),
-            match_quality: MatchQuality::Prefix,
-        };
+        let candidate = Candidate::new(
+            "src".to_string(),
+            true,
+            None,
+            String::new(),
+            MatchQuality::Prefix,
+        );
         let item =
             candidate.into_completion_item(tower_lsp::lsp_types::Range::default(), &settings(""));
         assert_eq!(item.label, "src/");
@@ -720,7 +735,7 @@ mod tests {
             prefix: "@a".to_string(),
         };
 
-        let items = PathSenseEngine.items_for_mapping_prefixes(&context, &settings);
+        let items = PathSenseEngine::items_for_mapping_prefixes(&context, &settings);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "@assets/");
     }
@@ -762,7 +777,7 @@ mod tests {
         };
         let settings = CompiledSettings::default();
 
-        let items = PathSenseEngine.items_for_context(&context, &workspace_roots, &settings);
+        let items = PathSenseEngine::items_for_context(&context, &workspace_roots, &settings);
         assert!(items.is_empty());
 
         let syntax = SyntaxState::new("YAML", text);
@@ -773,8 +788,7 @@ mod tests {
             syntax: snapshot.as_ref(),
             document_path: Some(document_path.as_path()),
             workspace_roots: &workspace_roots,
-            allow_empty_token: false,
-            is_auto_trigger: false,
+            is_manual_trigger: true,
             trigger_character: None,
             settings: &settings,
         };
@@ -811,15 +825,14 @@ mod tests {
             syntax: snapshot.as_ref(),
             document_path: Some(document_path.as_path()),
             workspace_roots: &workspace_roots,
-            allow_empty_token: false,
-            is_auto_trigger: true,
+            is_manual_trigger: false,
             trigger_character: None,
             settings: &settings,
         };
         assert!(PathSenseEngine.complete(&auto_request).is_none());
 
         let manual_request = CompletionRequest {
-            is_auto_trigger: false,
+            is_manual_trigger: true,
             ..auto_request
         };
         let Some(CompletionResponse::Array(items)) = PathSenseEngine.complete(&manual_request)
@@ -860,13 +873,16 @@ mod tests {
                 syntax: None,
                 document_path: context.document_path.as_deref(),
                 workspace_roots: &WorkspaceRoots::default(),
-                allow_empty_token: false,
-                is_auto_trigger: true,
+                is_manual_trigger: false,
                 trigger_character: None,
                 settings: &settings,
             };
 
-            assert!(!should_suppress_for_min_auto_trigger(&request, &context));
+            assert!(!should_suppress_for_min_auto_trigger(
+                &request,
+                &context,
+                settings.normalized_path_mapping_keys(),
+            ));
         }
     }
 
@@ -892,12 +908,15 @@ mod tests {
             syntax: None,
             document_path: context.document_path.as_deref(),
             workspace_roots: &WorkspaceRoots::default(),
-            allow_empty_token: false,
-            is_auto_trigger: true,
+            is_manual_trigger: false,
             trigger_character: Some('/'),
             settings: &settings,
         };
 
-        assert!(!should_suppress_for_min_auto_trigger(&request, &context));
+        assert!(!should_suppress_for_min_auto_trigger(
+            &request,
+            &context,
+            settings.normalized_path_mapping_keys(),
+        ));
     }
 }

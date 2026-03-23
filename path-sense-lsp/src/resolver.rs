@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::context::{CompletionContext, mapping_key_supports_prefix_completion};
 use crate::settings::{CompiledMappingEntry, CompiledSettings, SlashRoot};
@@ -17,8 +17,7 @@ impl WorkspaceRoots {
         }
 
         let document_path = document_path?;
-        self
-            .lsp_roots
+        self.lsp_roots
             .iter()
             .filter(|root| document_path.starts_with(root.as_path()))
             .max_by_key(|root| root.components().count())
@@ -142,8 +141,8 @@ fn resolve_home_fragment_base(fragment: &str, insert_prefix: &str) -> Vec<Resolv
     expand_home(Path::new("~")).map_or_else(Vec::new, |home_root| {
         vec![resolve_virtual_root(
             fragment,
-            home_root.clone(),
-            Some(home_root),
+            home_root.as_path(),
+            Some(home_root.clone()),
             insert_prefix.to_string(),
         )]
     })
@@ -161,8 +160,8 @@ fn resolve_slash_root_base(
             .map_or_else(Vec::new, |workspace_root| {
                 vec![resolve_virtual_root(
                     fragment,
-                    workspace_root.clone(),
-                    Some(workspace_root),
+                    workspace_root.as_path(),
+                    Some(workspace_root.clone()),
                     context.insert_prefix.clone(),
                 )]
             }),
@@ -170,8 +169,8 @@ fn resolve_slash_root_base(
             let filesystem_root = PathBuf::from("/");
             vec![resolve_virtual_root(
                 fragment,
-                filesystem_root.clone(),
-                Some(filesystem_root),
+                filesystem_root.as_path(),
+                Some(filesystem_root.clone()),
                 context.insert_prefix.clone(),
             )]
         }
@@ -188,8 +187,8 @@ fn resolve_workspace_root_base(
         .map_or_else(Vec::new, |workspace_root| {
             vec![resolve_virtual_root(
                 fragment,
-                workspace_root.clone(),
-                Some(workspace_root),
+                workspace_root.as_path(),
+                Some(workspace_root.clone()),
                 context.insert_prefix.clone(),
             )]
         })
@@ -208,12 +207,10 @@ fn resolve_document_relative_base(
         return Vec::new();
     };
 
+    // `fragment` has already been classified as document-relative, so it does not carry an
+    // explicit leading root marker here.
     let (dir_fragment, prefix) = split_relative_fragment(fragment);
-    let target_dir = if dir_fragment.is_empty() {
-        document_dir
-    } else {
-        document_dir.join(dir_fragment)
-    };
+    let target_dir = join_fragment_dir(&document_dir, dir_fragment);
 
     vec![ResolvedBase {
         target_dir,
@@ -249,9 +246,12 @@ fn resolve_from_mappings(
                     prefix: String::new(),
                     insert_prefix: exact_mapping_insert_prefix(mapping.normalized_key()),
                 },
-                MappingMatch::Nested(path_after_key) => {
-                    resolve_virtual_root(path_after_key, target.clone(), Some(target), String::new())
-                }
+                MappingMatch::Nested(path_after_key) => resolve_virtual_root(
+                    path_after_key,
+                    target.as_path(),
+                    Some(target.clone()),
+                    String::new(),
+                ),
             })
             .collect();
     }
@@ -272,6 +272,8 @@ fn mapping_match<'a>(normalized_key: &'a str, raw_token: &'a str) -> Option<Mapp
 
     let remainder = raw_token.strip_prefix(normalized_key)?;
     if normalized_key == "/" {
+        // `strip_prefix("/")` already removes the leading slash, so nested fragments under the
+        // slash-root mapping must use the remainder as-is instead of stripping another `/`.
         return Some(MappingMatch::Nested(remainder));
     }
 
@@ -323,16 +325,14 @@ fn resolve_mapping_target(value: &str, variables: &PathVariables) -> Option<Path
 
 fn resolve_virtual_root(
     fragment: &str,
-    root: PathBuf,
+    root: &Path,
     boundary_root: Option<PathBuf>,
     insert_prefix: String,
 ) -> ResolvedBase {
+    // `fragment` already has any explicit root marker removed (`/`, `~/`, mapping key, etc.),
+    // so `split_relative_fragment` never needs to handle a standalone `/` here.
     let (dir_fragment, prefix) = split_relative_fragment(fragment);
-    let target_dir = if dir_fragment.is_empty() {
-        root
-    } else {
-        root.join(dir_fragment)
-    };
+    let target_dir = join_fragment_dir(root, dir_fragment);
 
     ResolvedBase {
         target_dir,
@@ -343,9 +343,20 @@ fn resolve_virtual_root(
 }
 
 fn split_relative_fragment(fragment: &str) -> (&str, &str) {
+    // Callers only pass path fragments after removing explicit roots, so `/` is not a supported
+    // standalone input for this helper.
     match fragment.rfind('/') {
         Some(index) => (&fragment[..=index], &fragment[index + 1..]),
         None => ("", fragment),
+    }
+}
+
+fn join_fragment_dir(root: &Path, dir_fragment: &str) -> PathBuf {
+    let normalized_fragment = dir_fragment.trim_end_matches('/');
+    if normalized_fragment.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(normalized_fragment)
     }
 }
 
@@ -384,18 +395,25 @@ pub fn parent_candidate_dir(base: &ResolvedBase) -> Option<PathBuf> {
 }
 
 pub fn expand_home(fragment: &Path) -> Option<PathBuf> {
-    let fragment = fragment.to_str()?;
-    let remainder = if fragment == "~" {
-        ""
-    } else {
-        fragment.strip_prefix("~/")?
-    };
     let home_dir = std::env::var_os("HOME").map(PathBuf::from)?;
-    if remainder.is_empty() {
-        Some(home_dir)
-    } else {
-        Some(home_dir.join(remainder))
+
+    let mut components = fragment.components();
+    match components.next()? {
+        Component::Normal(segment) if segment == "~" => {}
+        _ => return None,
     }
+
+    let mut expanded = home_dir;
+    for component in components {
+        match component {
+            Component::CurDir => expanded.push("."),
+            Component::ParentDir => expanded.push(".."),
+            Component::Normal(segment) => expanded.push(segment),
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+
+    Some(expanded)
 }
 
 fn path_to_forward_slashes(path: &Path) -> String {
@@ -540,6 +558,28 @@ mod tests {
         assert_eq!(resolved[0].prefix, "");
         assert_eq!(resolved[0].insert_prefix, "~/");
         assert!(resolved[0].boundary_root.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expand_home_preserves_non_utf8_path_components() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let home_dir = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .expect("HOME should be set for tests");
+        let non_utf8_segment = OsString::from_vec(vec![0xFF, b'f', b'o', b'o']);
+        let fragment = PathBuf::from(OsString::from_vec(vec![b'~', b'/', 0xFF, b'f', b'o', b'o']));
+
+        let expanded = expand_home(fragment.as_path()).expect("expanded home path");
+        let mut expected = home_dir;
+        expected.push(non_utf8_segment);
+
+        assert_eq!(
+            expanded.as_os_str().as_bytes(),
+            expected.as_os_str().as_bytes()
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use serde::Deserialize;
 use tokio::sync::RwLock;
@@ -33,8 +34,7 @@ struct InternalInitializationOptions {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct CompletionTriggerState {
-    allow_empty_token: bool,
-    is_auto_trigger: bool,
+    is_manual_trigger: bool,
     trigger_character: Option<char>,
 }
 
@@ -168,8 +168,7 @@ impl LanguageServer for Backend {
             syntax: snapshot.syntax.as_ref(),
             document_path: snapshot.path.as_deref(),
             workspace_roots: &workspace_roots,
-            allow_empty_token: trigger.allow_empty_token,
-            is_auto_trigger: trigger.is_auto_trigger,
+            is_manual_trigger: trigger.is_manual_trigger,
             trigger_character: trigger.trigger_character,
             settings: settings.as_ref(),
         };
@@ -205,7 +204,7 @@ fn roots_from_initialize_params(params: &InitializeParams) -> Vec<PathBuf> {
 }
 
 fn completion_trigger_characters(alias_trigger_characters: &[String]) -> Vec<String> {
-    let mut characters = word_trigger_characters();
+    let mut characters = word_trigger_characters().clone();
     characters.extend(["/".to_string(), ".".to_string(), "~".to_string()]);
     let mut seen = characters.iter().cloned().collect::<BTreeSet<_>>();
 
@@ -221,22 +220,23 @@ fn completion_trigger_characters(alias_trigger_characters: &[String]) -> Vec<Str
     characters
 }
 
-fn word_trigger_characters() -> Vec<String> {
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
-        .chars()
-        .map(|character| character.to_string())
-        .collect()
+fn word_trigger_characters() -> &'static Vec<String> {
+    static WORD_TRIGGER_CHARACTERS: OnceLock<Vec<String>> = OnceLock::new();
+
+    WORD_TRIGGER_CHARACTERS.get_or_init(|| {
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+            .chars()
+            .map(|character| character.to_string())
+            .collect()
+    })
 }
 
 fn completion_trigger_state(
     context: Option<&tower_lsp::lsp_types::CompletionContext>,
 ) -> CompletionTriggerState {
-    let allow_empty_token = context
-        .is_none_or(|context| matches!(context.trigger_kind, CompletionTriggerKind::INVOKED));
-
     CompletionTriggerState {
-        allow_empty_token,
-        is_auto_trigger: !allow_empty_token,
+        is_manual_trigger: context
+            .is_none_or(|context| matches!(context.trigger_kind, CompletionTriggerKind::INVOKED)),
         trigger_character: context
             .and_then(|context| context.trigger_character.as_deref())
             .and_then(|character| character.chars().next()),
@@ -254,8 +254,8 @@ pub async fn run() {
 mod tests {
     use tower_lsp::lsp_types::{CompletionContext, CompletionTriggerKind};
 
-    use super::completion_trigger_state;
     use super::completion_trigger_characters;
+    use super::completion_trigger_state;
 
     #[test]
     fn trigger_characters_include_alias_prefixes_without_duplicates() {
@@ -291,16 +291,14 @@ mod tests {
             trigger_kind: CompletionTriggerKind::INVOKED,
             trigger_character: None,
         }));
-        assert!(manual.allow_empty_token);
-        assert!(!manual.is_auto_trigger);
+        assert!(manual.is_manual_trigger);
         assert_eq!(manual.trigger_character, None);
 
         let automatic = completion_trigger_state(Some(&CompletionContext {
             trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
             trigger_character: Some("/".to_string()),
         }));
-        assert!(!automatic.allow_empty_token);
-        assert!(automatic.is_auto_trigger);
+        assert!(!automatic.is_manual_trigger);
         assert_eq!(automatic.trigger_character, Some('/'));
     }
 

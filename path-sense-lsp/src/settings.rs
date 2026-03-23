@@ -112,11 +112,6 @@ impl PathSenseSettings {
     pub fn from_json_value(value: Value) -> Self {
         serde_json::from_value(value).unwrap_or_default()
     }
-
-    #[must_use]
-    pub fn should_retrigger_after_directory_completion(&self) -> bool {
-        self.directory_suffix.contains('/')
-    }
 }
 
 impl Default for CompiledSettings {
@@ -173,7 +168,7 @@ impl CompiledSettings {
 
     #[must_use]
     pub fn should_retrigger_after_directory_completion(&self) -> bool {
-        self.raw.should_retrigger_after_directory_completion()
+        self.raw.directory_suffix.contains('/')
     }
 
     #[must_use]
@@ -353,7 +348,9 @@ mod tests {
         assert_eq!(settings.ignored_files_patterns, vec!["vendor/**"]);
         assert_eq!(settings.ignored_prefixes, vec!["http://"]);
         assert_eq!(settings.directory_suffix, "");
-        assert!(!settings.should_retrigger_after_directory_completion());
+        assert!(
+            !CompiledSettings::from(settings.clone()).should_retrigger_after_directory_completion()
+        );
     }
 
     #[test]

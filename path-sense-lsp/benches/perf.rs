@@ -112,8 +112,7 @@ fn bench_repeated_completion(c: &mut Criterion) {
                 syntax: Some(black_box(&snapshot)),
                 document_path: Some(black_box(document_path.as_path())),
                 workspace_roots: black_box(&workspace_roots),
-                allow_empty_token: true,
-                is_auto_trigger: false,
+                is_manual_trigger: true,
                 trigger_character: None,
                 settings: black_box(&settings),
             };
