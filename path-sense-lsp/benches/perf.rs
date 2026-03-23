@@ -76,7 +76,6 @@ fn bench_context_extraction(c: &mut Criterion) {
                     Some(black_box(&snapshot)),
                     Some(black_box(document_path.as_path())),
                     false,
-                    &[],
                     None,
                 );
             });

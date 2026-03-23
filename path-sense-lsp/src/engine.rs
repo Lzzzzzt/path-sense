@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -52,7 +53,6 @@ impl PathSenseEngine {
             request.syntax,
             request.document_path,
             request.allow_empty_token,
-            mapping_keys,
             outside_strings.as_ref(),
         )?;
 
@@ -74,24 +74,36 @@ impl PathSenseEngine {
         }
 
         let bases = resolve_bases(&context, request.workspace_roots, request.settings);
-        let has_existing_file_base = bases.iter().any(base_points_to_existing_file);
-        let items = self.items_for_bases(&bases, context.replacement_range, request.settings);
+        let (items, has_existing_file_base) =
+            Self::completion_items_for_bases(&bases, context.replacement_range, request.settings);
         if items.is_empty() && has_existing_file_base {
             return None;
         }
         Some(CompletionResponse::Array(items))
     }
 
+    #[must_use]
     pub fn items_for_bases(
         &self,
         bases: &[ResolvedBase],
         replacement_range: tower_lsp::lsp_types::Range,
         settings: &CompiledSettings,
     ) -> Vec<CompletionItem> {
+        Self::completion_items_for_bases(bases, replacement_range, settings)
+            .0
+    }
+
+    fn completion_items_for_bases(
+        bases: &[ResolvedBase],
+        replacement_range: tower_lsp::lsp_types::Range,
+        settings: &CompiledSettings,
+    ) -> (Vec<CompletionItem>, bool) {
         let mut deduped = BTreeMap::new();
+        let mut has_existing_file_base = false;
 
         for base in bases {
             if base_points_to_existing_file(base) {
+                has_existing_file_base = true;
                 continue;
             }
             for candidate in read_directory_candidates(base, settings) {
@@ -100,17 +112,29 @@ impl PathSenseEngine {
                     candidate.is_dir,
                     candidate.insert_prefix.clone(),
                 );
-                deduped.entry(key).or_insert(candidate);
+                match deduped.entry(key) {
+                    Entry::Vacant(slot) => {
+                        slot.insert(candidate);
+                    }
+                    Entry::Occupied(mut slot) => {
+                        if compare_candidates(&candidate, slot.get()) == Ordering::Less {
+                            slot.insert(candidate);
+                        }
+                    }
+                }
             }
         }
 
         let mut candidates = deduped.into_values().collect::<Vec<_>>();
         candidates.sort_by(compare_candidates);
-        candidates
-            .into_iter()
-            .take(200)
-            .map(|candidate| candidate.into_completion_item(replacement_range, settings))
-            .collect()
+        (
+            candidates
+                .into_iter()
+                .take(200)
+                .map(|candidate| candidate.into_completion_item(replacement_range, settings))
+                .collect(),
+            has_existing_file_base,
+        )
     }
 
     #[must_use]
@@ -146,6 +170,7 @@ impl PathSenseEngine {
                 name: key.clone(),
                 is_dir: true,
                 insert_prefix: String::new(),
+                match_quality: MatchQuality::Prefix,
             })
             .collect::<Vec<_>>();
 
@@ -214,6 +239,13 @@ struct Candidate {
     name: String,
     is_dir: bool,
     insert_prefix: String,
+    match_quality: MatchQuality,
+}
+
+#[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum MatchQuality {
+    Prefix,
+    Contains,
 }
 
 impl Candidate {
@@ -230,10 +262,12 @@ impl Candidate {
     }
 
     fn sort_bucket(&self) -> u8 {
-        if self.name == ".." {
-            2
-        } else {
-            u8::from(!self.is_dir)
+        match (self.name == "..", self.match_quality, self.is_dir) {
+            (true, _, _) => 4,
+            (false, MatchQuality::Prefix, true) => 0,
+            (false, MatchQuality::Prefix, false) => 1,
+            (false, MatchQuality::Contains, true) => 2,
+            (false, MatchQuality::Contains, false) => 3,
         }
     }
 
@@ -314,6 +348,7 @@ fn read_directory_candidates(base: &ResolvedBase, settings: &CompiledSettings) -
             name: "..".to_string(),
             is_dir: true,
             insert_prefix: base.insert_prefix.clone(),
+            match_quality: MatchQuality::Prefix,
         });
     }
 
@@ -330,15 +365,16 @@ fn read_directory_candidates(base: &ResolvedBase, settings: &CompiledSettings) -
         if name.starts_with('.') && !show_hidden {
             continue;
         }
-        if !name.starts_with(base.prefix.as_str()) {
+        let Some(match_quality) = match_quality(name.as_str(), base.prefix.as_str()) else {
             continue;
-        }
+        };
 
         let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
         candidates.push(Candidate {
             name,
             is_dir,
             insert_prefix: base.insert_prefix.clone(),
+            match_quality,
         });
     }
 
@@ -347,6 +383,18 @@ fn read_directory_candidates(base: &ResolvedBase, settings: &CompiledSettings) -
 
 fn synthetic_parent_matches_prefix(prefix: &str) -> bool {
     prefix == "." || prefix == ".."
+}
+
+fn match_quality(name: &str, prefix: &str) -> Option<MatchQuality> {
+    if name.starts_with(prefix) {
+        Some(MatchQuality::Prefix)
+    } else if prefix.starts_with('.') {
+        None
+    } else if name.contains(prefix) {
+        Some(MatchQuality::Contains)
+    } else {
+        None
+    }
 }
 
 #[must_use]
@@ -410,7 +458,6 @@ mod tests {
             snapshot.as_ref(),
             document_path,
             allow_empty_token,
-            &[],
             None,
         )
         .expect("context")
@@ -453,37 +500,68 @@ mod tests {
     }
 
     #[test]
+    fn candidate_sorting_prefers_prefix_matches_before_contains_matches() {
+        let tmp = tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("result_dir")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("feature_dir")).unwrap();
+        std::fs::write(tmp.path().join("report.txt"), "x").unwrap();
+        std::fs::write(tmp.path().join("feature.txt"), "x").unwrap();
+
+        let mut candidates =
+            read_directory_candidates(&base(tmp.path().to_path_buf(), "re"), &settings("/"));
+        candidates.sort_by(compare_candidates);
+        let names: Vec<_> = candidates
+            .into_iter()
+            .map(|candidate| candidate.name)
+            .collect();
+
+        assert_eq!(
+            names,
+            vec![
+                "result_dir".to_string(),
+                "report.txt".to_string(),
+                "feature_dir".to_string(),
+                "feature.txt".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn synthetic_parent_candidate_uses_lowest_sort_text() {
         let item = Candidate {
             name: "..".to_string(),
             is_dir: true,
             insert_prefix: String::new(),
+            match_quality: MatchQuality::Prefix,
         }
         .into_completion_item(tower_lsp::lsp_types::Range::default(), &settings("/"));
 
-        assert_eq!(item.sort_text.as_deref(), Some("2.."));
+        assert_eq!(item.sort_text.as_deref(), Some("4.."));
     }
 
     #[test]
     fn hidden_entries_are_filtered_unless_prefix_starts_with_dot() {
         let tmp = tempdir().expect("tempdir");
         std::fs::write(tmp.path().join(".hidden"), "x").unwrap();
+        std::fs::write(tmp.path().join("main.rs"), "x").unwrap();
         std::fs::write(tmp.path().join("visible"), "x").unwrap();
 
         let candidates =
             read_directory_candidates(&base(tmp.path().to_path_buf(), ""), &settings("/"));
-        let names: Vec<_> = candidates
+        let mut names: Vec<_> = candidates
             .into_iter()
             .map(|candidate| candidate.name)
             .collect();
-        assert_eq!(names, vec!["visible".to_string()]);
+        names.sort();
+        assert_eq!(names, vec!["main.rs".to_string(), "visible".to_string()]);
 
         let candidates =
             read_directory_candidates(&base(tmp.path().to_path_buf(), "."), &settings("/"));
-        let names: Vec<_> = candidates
+        let mut names: Vec<_> = candidates
             .into_iter()
             .map(|candidate| candidate.name)
             .collect();
+        names.sort();
         assert_eq!(names, vec!["..".to_string(), ".hidden".to_string()]);
     }
 
@@ -510,6 +588,7 @@ mod tests {
             name: "src".to_string(),
             is_dir: true,
             insert_prefix: String::new(),
+            match_quality: MatchQuality::Prefix,
         };
         let item =
             candidate.into_completion_item(tower_lsp::lsp_types::Range::default(), &settings("/"));
@@ -536,6 +615,7 @@ mod tests {
             name: "Documents".to_string(),
             is_dir: true,
             insert_prefix: "~/".to_string(),
+            match_quality: MatchQuality::Prefix,
         };
         let item =
             candidate.into_completion_item(tower_lsp::lsp_types::Range::default(), &settings("/"));
@@ -553,6 +633,7 @@ mod tests {
             name: "src".to_string(),
             is_dir: true,
             insert_prefix: String::new(),
+            match_quality: MatchQuality::Prefix,
         };
         let item =
             candidate.into_completion_item(tower_lsp::lsp_types::Range::default(), &settings(""));

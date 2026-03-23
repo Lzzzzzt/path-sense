@@ -44,7 +44,6 @@ fn extract(
         snapshot.as_ref(),
         Some(document_path),
         allow_empty_token,
-        &[],
         None,
     )
     .expect("context")
@@ -211,6 +210,40 @@ fn integration_completion_lists_files_in_directory() {
 
     assert_eq!(labels, vec!["main.rs"]);
     assert_eq!(items[0].sort_text.as_deref(), Some("1main.rs"));
+}
+
+#[test]
+fn integration_completion_supports_contains_matching_with_prefix_priority() {
+    let tmp = tempdir().expect("tempdir");
+    let project = tmp.path().join("project");
+    let src = project.join("src");
+    std::fs::create_dir_all(src.join("result_dir")).expect("mkdir result_dir");
+    std::fs::create_dir_all(src.join("feature_dir")).expect("mkdir feature_dir");
+    std::fs::write(src.join("report.txt"), "x").expect("write report");
+    std::fs::write(src.join("feature.txt"), "x").expect("write feature");
+
+    let document_path = project.join("config.yaml");
+    let text = r#"path: "./src/re""#;
+    let context = extract(
+        text,
+        position(0, 15),
+        "YAML",
+        document_path.as_path(),
+        false,
+    );
+
+    let engine = PathSenseEngine;
+    let items = engine.items_for_context(
+        &context,
+        &workspace_roots(project.as_path()),
+        &default_settings(),
+    );
+    let labels: Vec<_> = items.iter().map(|item| item.label.as_str()).collect();
+
+    assert_eq!(
+        labels,
+        vec!["result_dir/", "report.txt", "feature_dir/", "feature.txt"]
+    );
 }
 
 #[test]

@@ -30,6 +30,13 @@ struct InternalInitializationOptions {
     alias_trigger_characters: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CompletionTriggerState {
+    allow_empty_token: bool,
+    is_auto_trigger: bool,
+    trigger_character: Option<char>,
+}
+
 pub struct Backend {
     client: Client,
     documents: Arc<RwLock<DocumentStore>>,
@@ -149,16 +156,7 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let allow_empty_token = params
-            .context
-            .as_ref()
-            .is_none_or(|context| matches!(context.trigger_kind, CompletionTriggerKind::INVOKED));
-        let is_auto_trigger = !allow_empty_token;
-        let trigger_character = params
-            .context
-            .as_ref()
-            .and_then(|context| context.trigger_character.as_deref())
-            .and_then(|character| character.chars().next());
+        let trigger = completion_trigger_state(params.context.as_ref());
         let settings = self.settings().await;
         let workspace_roots = self.workspace_roots().await;
 
@@ -168,9 +166,9 @@ impl LanguageServer for Backend {
             syntax: snapshot.syntax.as_ref(),
             document_path: snapshot.path.as_deref(),
             workspace_roots: &workspace_roots,
-            allow_empty_token,
-            is_auto_trigger,
-            trigger_character,
+            allow_empty_token: trigger.allow_empty_token,
+            is_auto_trigger: trigger.is_auto_trigger,
+            trigger_character: trigger.trigger_character,
             settings: settings.as_ref(),
         };
         Ok(self.engine.complete(&request))
@@ -223,6 +221,21 @@ fn word_trigger_characters() -> Vec<String> {
         .collect()
 }
 
+fn completion_trigger_state(
+    context: Option<&tower_lsp::lsp_types::CompletionContext>,
+) -> CompletionTriggerState {
+    let allow_empty_token = context
+        .is_none_or(|context| matches!(context.trigger_kind, CompletionTriggerKind::INVOKED));
+
+    CompletionTriggerState {
+        allow_empty_token,
+        is_auto_trigger: !allow_empty_token,
+        trigger_character: context
+            .and_then(|context| context.trigger_character.as_deref())
+            .and_then(|character| character.chars().next()),
+    }
+}
+
 pub async fn run() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
@@ -232,6 +245,9 @@ pub async fn run() {
 
 #[cfg(test)]
 mod tests {
+    use tower_lsp::lsp_types::{CompletionContext, CompletionTriggerKind};
+
+    use super::completion_trigger_state;
     use super::completion_trigger_characters;
 
     #[test]
@@ -260,5 +276,24 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn completion_trigger_state_distinguishes_manual_and_auto_requests() {
+        let manual = completion_trigger_state(Some(&CompletionContext {
+            trigger_kind: CompletionTriggerKind::INVOKED,
+            trigger_character: None,
+        }));
+        assert!(manual.allow_empty_token);
+        assert!(!manual.is_auto_trigger);
+        assert_eq!(manual.trigger_character, None);
+
+        let automatic = completion_trigger_state(Some(&CompletionContext {
+            trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
+            trigger_character: Some("/".to_string()),
+        }));
+        assert!(!automatic.allow_empty_token);
+        assert!(automatic.is_auto_trigger);
+        assert_eq!(automatic.trigger_character, Some('/'));
     }
 }

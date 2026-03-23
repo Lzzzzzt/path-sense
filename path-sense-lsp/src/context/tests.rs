@@ -19,7 +19,7 @@ fn extract(
     language_id: &str,
     document_path: Option<&Path>,
     allow_empty_token: bool,
-    mapping_keys: &[String],
+    _mapping_keys: &[String],
     outside_strings: Option<&OutsideStringsConfig<'_>>,
 ) -> Option<CompletionContext> {
     let syntax = SyntaxState::new(language_id, text);
@@ -30,7 +30,6 @@ fn extract(
         snapshot.as_ref(),
         document_path,
         allow_empty_token,
-        mapping_keys,
         outside_strings,
     )
 }

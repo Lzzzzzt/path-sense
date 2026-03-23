@@ -25,7 +25,6 @@ pub fn extract_completion_context(
     syntax: Option<&SyntaxSnapshot>,
     document_path: Option<&Path>,
     allow_empty_token: bool,
-    _mapping_keys: &[String],
     outside_strings: Option<&OutsideStringsConfig<'_>>,
 ) -> Option<CompletionContext> {
     let cursor = CursorLocation {

@@ -17,15 +17,12 @@ impl WorkspaceRoots {
         }
 
         let document_path = document_path?;
-        let mut matching_roots = self
+        self
             .lsp_roots
             .iter()
             .filter(|root| document_path.starts_with(root.as_path()))
-            .collect::<Vec<_>>();
-        matching_roots.sort_by_key(|root| root.components().count());
-        matching_roots
-            .last()
-            .map(|root| (*root).clone())
+            .max_by_key(|root| root.components().count())
+            .cloned()
             .or_else(|| self.lsp_roots.first().cloned())
     }
 
@@ -43,6 +40,15 @@ pub struct ResolvedBase {
     pub boundary_root: Option<PathBuf>,
     pub prefix: String,
     pub insert_prefix: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NonMappingBaseKind<'a> {
+    ExactHome,
+    HomeFragment(&'a str),
+    SlashRooted(&'a str),
+    WorkspaceRooted(&'a str),
+    DocumentRelative(&'a str),
 }
 
 #[must_use]
@@ -68,89 +74,44 @@ fn resolve_non_mapping_bases(
     workspace_roots: &WorkspaceRoots,
     settings: &CompiledSettings,
 ) -> Vec<ResolvedBase> {
-    let raw_token = context.raw_token.as_str();
+    match classify_non_mapping_base(context.raw_token.as_str(), settings) {
+        NonMappingBaseKind::ExactHome => resolve_exact_home_base(),
+        NonMappingBaseKind::HomeFragment(fragment) => {
+            resolve_home_fragment_base(fragment, context.insert_prefix.as_str())
+        }
+        NonMappingBaseKind::SlashRooted(fragment) => {
+            resolve_slash_root_base(fragment, context, workspace_roots, settings)
+        }
+        NonMappingBaseKind::WorkspaceRooted(fragment) => {
+            resolve_workspace_root_base(fragment, context, workspace_roots)
+        }
+        NonMappingBaseKind::DocumentRelative(fragment) => {
+            resolve_document_relative_base(fragment, context)
+        }
+    }
+}
 
+fn classify_non_mapping_base<'a>(
+    raw_token: &'a str,
+    settings: &CompiledSettings,
+) -> NonMappingBaseKind<'a> {
     if raw_token == "~" {
-        return expand_home(Path::new("~")).map_or_else(Vec::new, |home_root| {
-            vec![ResolvedBase {
-                target_dir: home_root.clone(),
-                boundary_root: Some(home_root),
-                prefix: String::new(),
-                insert_prefix: "~/".to_string(),
-            }]
-        });
+        return NonMappingBaseKind::ExactHome;
     }
 
-    if let Some(home_fragment) = raw_token.strip_prefix("~/") {
-        return expand_home(Path::new("~")).map_or_else(Vec::new, |home_root| {
-            vec![resolve_virtual_root(
-                home_fragment,
-                home_root.clone(),
-                Some(home_root),
-                context.insert_prefix.clone(),
-            )]
-        });
+    if let Some(fragment) = raw_token.strip_prefix("~/") {
+        return NonMappingBaseKind::HomeFragment(fragment);
     }
 
-    if raw_token.starts_with('/') {
-        return match settings.slash_root() {
-            SlashRoot::Workspace => workspace_roots
-                .workspace_root_for_document(context.document_path.as_deref())
-                .map_or_else(Vec::new, |workspace_root| {
-                    vec![resolve_virtual_root(
-                        raw_token.trim_start_matches('/'),
-                        workspace_root.clone(),
-                        Some(workspace_root),
-                        context.insert_prefix.clone(),
-                    )]
-                }),
-            SlashRoot::Filesystem => {
-                let filesystem_root = PathBuf::from("/");
-                vec![resolve_virtual_root(
-                    raw_token.trim_start_matches('/'),
-                    filesystem_root.clone(),
-                    Some(filesystem_root),
-                    context.insert_prefix.clone(),
-                )]
-            }
-        };
+    if let Some(fragment) = raw_token.strip_prefix('/') {
+        return NonMappingBaseKind::SlashRooted(fragment);
     }
 
     if should_resolve_from_workspace_root(raw_token, settings) {
-        return workspace_roots
-            .workspace_root_for_document(context.document_path.as_deref())
-            .map_or_else(Vec::new, |workspace_root| {
-                vec![resolve_virtual_root(
-                    raw_token,
-                    workspace_root.clone(),
-                    Some(workspace_root),
-                    context.insert_prefix.clone(),
-                )]
-            });
+        return NonMappingBaseKind::WorkspaceRooted(raw_token);
     }
 
-    let Some(document_dir) = context
-        .document_path
-        .as_deref()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-    else {
-        return Vec::new();
-    };
-
-    let (dir_fragment, prefix) = split_relative_fragment(raw_token);
-    let target_dir = if dir_fragment.is_empty() {
-        document_dir
-    } else {
-        document_dir.join(dir_fragment)
-    };
-
-    vec![ResolvedBase {
-        target_dir,
-        boundary_root: None,
-        prefix: prefix.to_string(),
-        insert_prefix: context.insert_prefix.clone(),
-    }]
+    NonMappingBaseKind::DocumentRelative(raw_token)
 }
 
 fn should_resolve_from_workspace_root(raw_token: &str, settings: &CompiledSettings) -> bool {
@@ -166,6 +127,102 @@ fn has_explicit_path_root(raw_token: &str) -> bool {
     raw_token.starts_with('~') || raw_token.starts_with('.') || raw_token.starts_with('/')
 }
 
+fn resolve_exact_home_base() -> Vec<ResolvedBase> {
+    expand_home(Path::new("~")).map_or_else(Vec::new, |home_root| {
+        vec![ResolvedBase {
+            target_dir: home_root.clone(),
+            boundary_root: Some(home_root),
+            prefix: String::new(),
+            insert_prefix: "~/".to_string(),
+        }]
+    })
+}
+
+fn resolve_home_fragment_base(fragment: &str, insert_prefix: &str) -> Vec<ResolvedBase> {
+    expand_home(Path::new("~")).map_or_else(Vec::new, |home_root| {
+        vec![resolve_virtual_root(
+            fragment,
+            home_root.clone(),
+            Some(home_root),
+            insert_prefix.to_string(),
+        )]
+    })
+}
+
+fn resolve_slash_root_base(
+    fragment: &str,
+    context: &CompletionContext,
+    workspace_roots: &WorkspaceRoots,
+    settings: &CompiledSettings,
+) -> Vec<ResolvedBase> {
+    match settings.slash_root() {
+        SlashRoot::Workspace => workspace_roots
+            .workspace_root_for_document(context.document_path.as_deref())
+            .map_or_else(Vec::new, |workspace_root| {
+                vec![resolve_virtual_root(
+                    fragment,
+                    workspace_root.clone(),
+                    Some(workspace_root),
+                    context.insert_prefix.clone(),
+                )]
+            }),
+        SlashRoot::Filesystem => {
+            let filesystem_root = PathBuf::from("/");
+            vec![resolve_virtual_root(
+                fragment,
+                filesystem_root.clone(),
+                Some(filesystem_root),
+                context.insert_prefix.clone(),
+            )]
+        }
+    }
+}
+
+fn resolve_workspace_root_base(
+    fragment: &str,
+    context: &CompletionContext,
+    workspace_roots: &WorkspaceRoots,
+) -> Vec<ResolvedBase> {
+    workspace_roots
+        .workspace_root_for_document(context.document_path.as_deref())
+        .map_or_else(Vec::new, |workspace_root| {
+            vec![resolve_virtual_root(
+                fragment,
+                workspace_root.clone(),
+                Some(workspace_root),
+                context.insert_prefix.clone(),
+            )]
+        })
+}
+
+fn resolve_document_relative_base(
+    fragment: &str,
+    context: &CompletionContext,
+) -> Vec<ResolvedBase> {
+    let Some(document_dir) = context
+        .document_path
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+    else {
+        return Vec::new();
+    };
+
+    let (dir_fragment, prefix) = split_relative_fragment(fragment);
+    let target_dir = if dir_fragment.is_empty() {
+        document_dir
+    } else {
+        document_dir.join(dir_fragment)
+    };
+
+    vec![ResolvedBase {
+        target_dir,
+        boundary_root: None,
+        prefix: prefix.to_string(),
+        insert_prefix: context.insert_prefix.clone(),
+    }]
+}
+
 fn resolve_from_mappings(
     context: &CompletionContext,
     workspace_roots: &WorkspaceRoots,
@@ -174,32 +231,7 @@ fn resolve_from_mappings(
     let raw_token = context.raw_token.as_str();
 
     for mapping in settings.mapping_entries() {
-        let normalized_key = mapping.normalized_key();
-        if raw_token == normalized_key {
-            let targets =
-                expand_mapping_targets(mapping, context.document_path.as_deref(), workspace_roots);
-
-            if !targets.is_empty() {
-                return targets
-                    .into_iter()
-                    .map(|target| ResolvedBase {
-                        target_dir: target.clone(),
-                        boundary_root: Some(target),
-                        prefix: String::new(),
-                        insert_prefix: exact_mapping_insert_prefix(normalized_key),
-                    })
-                    .collect();
-            }
-        }
-
-        let Some(remainder) = raw_token.strip_prefix(normalized_key) else {
-            continue;
-        };
-        let path_after_key = if normalized_key == "/" {
-            remainder
-        } else if let Some(stripped) = remainder.strip_prefix('/') {
-            stripped
-        } else {
+        let Some(match_kind) = mapping_match(mapping.normalized_key(), raw_token) else {
             continue;
         };
         let targets =
@@ -210,13 +242,40 @@ fn resolve_from_mappings(
 
         return targets
             .into_iter()
-            .map(|target| {
-                resolve_virtual_root(path_after_key, target.clone(), Some(target), String::new())
+            .map(|target| match match_kind {
+                MappingMatch::Exact => ResolvedBase {
+                    target_dir: target.clone(),
+                    boundary_root: Some(target),
+                    prefix: String::new(),
+                    insert_prefix: exact_mapping_insert_prefix(mapping.normalized_key()),
+                },
+                MappingMatch::Nested(path_after_key) => {
+                    resolve_virtual_root(path_after_key, target.clone(), Some(target), String::new())
+                }
             })
             .collect();
     }
 
     Vec::new()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MappingMatch<'a> {
+    Exact,
+    Nested(&'a str),
+}
+
+fn mapping_match<'a>(normalized_key: &'a str, raw_token: &'a str) -> Option<MappingMatch<'a>> {
+    if raw_token == normalized_key {
+        return Some(MappingMatch::Exact);
+    }
+
+    let remainder = raw_token.strip_prefix(normalized_key)?;
+    if normalized_key == "/" {
+        return Some(MappingMatch::Nested(remainder));
+    }
+
+    remainder.strip_prefix('/').map(MappingMatch::Nested)
 }
 
 fn exact_mapping_insert_prefix(key: &str) -> String {
